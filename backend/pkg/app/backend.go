@@ -38,6 +38,7 @@ import (
 	azureclient "github.com/Azure/ARO-HCP/backend/pkg/azure/client"
 	azureconfig "github.com/Azure/ARO-HCP/backend/pkg/azure/config"
 	"github.com/Azure/ARO-HCP/backend/pkg/controllers/billing"
+	clusterautonode "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/autonode"
 	clusterazureresources "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/azureresources"
 	clusterbackups "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/backups"
 	clustercreation "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/creation"
@@ -728,6 +729,14 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 		b.options.BackupConfig,
 	)
 
+	autoNodeEnablerController := clusterautonode.NewAutoNodeEnablerController(
+		b.options.ResourcesDBClient,
+		b.options.KubeApplierDBClients,
+		backendInformers,
+		unionKubeApplierInformers,
+		b.options.MaestroSourceEnvironmentIdentifier,
+	)
+
 	keyRotationBackupController := clusterbackups.NewKeyRotationBackupController(
 		b.options.ResourcesDBClient,
 		b.options.KubeApplierDBClients,
@@ -1203,6 +1212,7 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 				go cosmosMigrationController.Run(ctx, 5)
 				go virtualMachineResourceSKUsCachedReaderController.Run(ctx, 20)
 				go backupScheduleController.Run(ctx, 20)
+				go autoNodeEnablerController.Run(ctx, 20)
 				go fetchMSIIdentitiesInfoController.Run(ctx, 20)
 				go fetchDataPlaneOperatorsManagedIdentitiesInfoController.Run(ctx, 20)
 				go observeRoleAssignmentsController.Run(ctx, 20)
