@@ -306,6 +306,47 @@ type ServiceProviderClusterStatus struct {
 	// cannot lose the record. Empty means no backup has completed.
 	// Written by: KeyRotationBackup
 	KeyRotationBackupFingerprint string `json:"keyRotationBackupFingerprint,omitempty"`
+
+	// AutoNode reports the observed state of the AutoNode (Karpenter)
+	// provisioner, mirrored from the management cluster's
+	// HostedCluster.status.autoNode.
+	//
+	// Karpenter-provisioned nodes are not HyperShift NodePool machines, so they
+	// are invisible to the ARM node pool list: nothing else in Cosmos tells the
+	// RP how many nodes a Karpenter-enabled cluster actually has. Mirroring the
+	// aggregate here gives service-provider-side logic (for example control
+	// plane sizing, which scales with node count) a number to work from,
+	// without exposing it on any versioned ARM API and without anything outside
+	// the backend reaching the management cluster.
+	//
+	// Nil when AutoNode is disabled or has not been observed yet; the
+	// hypershift-operator clears status.autoNode on disable, so this field
+	// follows it back to nil.
+	// Written by: AutoNodeStatus
+	AutoNode *ServiceProviderClusterAutoNodeStatus `json:"autoNode,omitempty"`
+}
+
+// ServiceProviderClusterAutoNodeStatus is the distilled form of the observed
+// HostedCluster.status.autoNode. It deliberately re-declares the fields rather
+// than embedding hypershift's AutoNodeStatus: this is the Cosmos schema, and it
+// should not change shape just because the upstream API does.
+type ServiceProviderClusterAutoNodeStatus struct {
+	// NodeCount is the number of nodes fully provisioned by Karpenter, i.e.
+	// node objects that exist in the guest cluster and carry the
+	// karpenter.sh/nodepool label.
+	// Written by: AutoNodeStatus
+	NodeCount *int32 `json:"nodeCount,omitempty"`
+
+	// NodeClaimCount is the total number of NodeClaims managed by Karpenter:
+	// what Karpenter intends to provision, whether or not the node object
+	// exists yet. It exceeds NodeCount while provisioning is in flight.
+	// Written by: AutoNodeStatus
+	NodeClaimCount *int32 `json:"nodeClaimCount,omitempty"`
+
+	// VCPUs is the total number of virtual CPUs across all Karpenter-managed
+	// nodes that have registered and reported capacity.
+	// Written by: AutoNodeStatus
+	VCPUs *int32 `json:"vcpus,omitempty"`
 }
 
 // ServiceProviderClusterMSIManagedIdentities holds Managed Service Identity (MSI)

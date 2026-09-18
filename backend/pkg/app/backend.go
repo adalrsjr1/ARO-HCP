@@ -737,6 +737,14 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 		b.options.MaestroSourceEnvironmentIdentifier,
 	)
 
+	autoNodeStatusController := clusterautonode.NewAutoNodeStatusController(
+		b.options.ResourcesDBClient,
+		serviceProviderClusterLister,
+		backendInformers,
+		unionKubeApplierInformers,
+		unionReadDesireLister,
+	)
+
 	keyRotationBackupController := clusterbackups.NewKeyRotationBackupController(
 		b.options.ResourcesDBClient,
 		b.options.KubeApplierDBClients,
@@ -1217,6 +1225,7 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 				go fetchDataPlaneOperatorsManagedIdentitiesInfoController.Run(ctx, 20)
 				go observeRoleAssignmentsController.Run(ctx, 20)
 				go keyRotationBackupController.Run(ctx, 20)
+				go autoNodeStatusController.Run(ctx, 20)
 			},
 			OnStoppedLeading: func() {
 				// This needs to be defined even though it does nothing.

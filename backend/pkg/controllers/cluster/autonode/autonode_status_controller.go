@@ -1,0 +1,160 @@
+// Copyright 2026 Microsoft Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package autonode
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	hsv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+
+	"github.com/Azure/ARO-HCP/backend/pkg/kubeapplierhelpers"
+	"github.com/Azure/ARO-HCP/backend/pkg/utils/controllerutils"
+	"github.com/Azure/ARO-HCP/internal/api/coreapi"
+	controllerutil "github.com/Azure/ARO-HCP/internal/controllerutils"
+	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/corecosmosstorage"
+	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/cosmosstorageutils"
+	"github.com/Azure/ARO-HCP/internal/database/informers/coreinformers"
+	"github.com/Azure/ARO-HCP/internal/database/listers/corelisters"
+	"github.com/Azure/ARO-HCP/internal/database/listers/kubeapplierlisters"
+	unionkubeapplierinformers "github.com/Azure/ARO-HCP/internal/database/unioninformers/kubeapplier"
+	"github.com/Azure/ARO-HCP/internal/utils"
+)
+
+// AutoNodeStatusControllerName is the controller name.
+const AutoNodeStatusControllerName = "AutoNodeStatus"
+
+// autoNodeStatusSyncer mirrors the observed HostedCluster.status.autoNode
+// onto ServiceProviderCluster.Status.AutoNode.
+//
+// Karpenter-provisioned nodes are not HyperShift NodePool machines and never
+// appear in the ARM node pool list, so without this mirror nothing in Cosmos
+// records how large a Karpenter-enabled cluster has grown. The counts
+// themselves are computed by the karpenter-operator against the guest cluster
+// and published on HostedControlPlane.status.autoNode, which the
+// hypershift-operator copies onto the HostedCluster; this controller only reads
+// the already-mirrored HostedCluster, so no guest-cluster access is involved.
+//
+// Kept separate from autoNodeSyncer deliberately: that one writes desired state
+// (an ApplyDesire carrying spec.autoNode), this one reads observed state. Same
+// split as the version package's desired/active controllers.
+type autoNodeStatusSyncer struct {
+	resourcesDBClient            corecosmosstorage.ResourcesDBClient
+	readDesireLister             kubeapplierlisters.ReadDesireLister
+	serviceProviderClusterLister corelisters.ServiceProviderClusterLister
+}
+
+var _ controllerutils.ClusterSyncer = (*autoNodeStatusSyncer)(nil)
+
+// NewAutoNodeStatusController wires the controller that populates
+// ServiceProviderCluster.Status.AutoNode from the per-cluster ReadDesire's
+// observed HostedCluster.
+func NewAutoNodeStatusController(
+	resourcesDBClient corecosmosstorage.ResourcesDBClient,
+	serviceProviderClusterLister corelisters.ServiceProviderClusterLister,
+	informers coreinformers.BackendInformers,
+	kubeApplierInformers *unionkubeapplierinformers.UnionKubeApplierInformers,
+	readDesireLister kubeapplierlisters.ReadDesireLister,
+) controllerutils.Controller {
+	syncer := &autoNodeStatusSyncer{
+		resourcesDBClient:            resourcesDBClient,
+		readDesireLister:             readDesireLister,
+		serviceProviderClusterLister: serviceProviderClusterLister,
+	}
+
+	return controllerutils.NewClusterWatchingController(
+		AutoNodeStatusControllerName,
+		resourcesDBClient,
+		informers,
+		kubeApplierInformers,
+		5*time.Minute,
+		syncer,
+	)
+}
+
+func (c *autoNodeStatusSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPClusterKey) error {
+	existingCluster, err := c.resourcesDBClient.HCPClusters(key.SubscriptionID, key.ResourceGroupName).Get(ctx, key.HCPClusterName)
+	if cosmosstorageutils.IsNotFoundError(err) {
+		return nil
+	}
+	if err != nil {
+		return utils.TrackError(fmt.Errorf("failed to get Cluster: %w", err))
+	}
+	if existingCluster.ServiceProviderProperties.DeletionTimestamp != nil {
+		return nil
+	}
+
+	hostedCluster, err := kubeapplierhelpers.GetCachedHostedClusterForCluster(ctx, c.readDesireLister, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
+	if err != nil {
+		return utils.TrackError(fmt.Errorf("failed to get HostedCluster from ReadDesire: %w", err))
+	}
+	if hostedCluster == nil {
+		// ReadDesire absent or kubeContent not yet observed; we are retriggered
+		// once the kube-applier writes status.
+		return nil
+	}
+
+	newAutoNode := autoNodeStatusFromHostedCluster(hostedCluster)
+
+	cachedServiceProviderCluster, err := c.serviceProviderClusterLister.Get(ctx, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
+	if cosmosstorageutils.IsNotFoundError(err) {
+		// CreateServiceProviderCluster will populate it; we'll be re-enqueued
+		// via the ServiceProviderCluster informer.
+		return nil
+	}
+	if err != nil {
+		return utils.TrackError(fmt.Errorf("failed to get ServiceProviderCluster: %w", err))
+	}
+
+	// Node counts move on every scale event, so the compare is what keeps this
+	// from issuing a Cosmos Replace on every single resync.
+	oldAutoNode := cachedServiceProviderCluster.Status.AutoNode
+	if !controllerutil.NeedsUpdate(oldAutoNode, newAutoNode) {
+		return nil
+	}
+
+	logger := utils.LoggerFromContext(ctx)
+	logger.Info("AutoNode status changed", "oldAutoNode", oldAutoNode, "newAutoNode", newAutoNode)
+
+	replacement := cachedServiceProviderCluster.DeepCopy()
+	replacement.Status.AutoNode = newAutoNode
+	serviceProviderClustersCosmosClient := c.resourcesDBClient.ServiceProviderClusters(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
+	if _, err := serviceProviderClustersCosmosClient.Replace(ctx, replacement, nil); err != nil {
+		return utils.TrackError(fmt.Errorf("failed to replace ServiceProviderCluster: %w", err))
+	}
+
+	return nil
+}
+
+// autoNodeStatusFromHostedCluster distills the observed
+// HostedCluster.status.autoNode into its coreapi form.
+//
+// hypershift declares status.autoNode as a value (not a pointer) whose fields
+// are all optional, and the hypershift-operator zeroes the whole struct when
+// AutoNode is disabled. An all-nil struct therefore means "not enabled / not
+// reported", and is mapped to nil here so disabling AutoNode clears the mirror
+// rather than pinning it at a stale or zeroed reading.
+func autoNodeStatusFromHostedCluster(hostedCluster *hsv1beta1.HostedCluster) *coreapi.ServiceProviderClusterAutoNodeStatus {
+	observed := hostedCluster.Status.AutoNode
+	if observed.NodeCount == nil && observed.NodeClaimCount == nil && observed.VCPUs == nil {
+		return nil
+	}
+	return &coreapi.ServiceProviderClusterAutoNodeStatus{
+		NodeCount:      observed.NodeCount,
+		NodeClaimCount: observed.NodeClaimCount,
+		VCPUs:          observed.VCPUs,
+	}
+}

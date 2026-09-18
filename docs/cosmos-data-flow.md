@@ -1256,6 +1256,32 @@ No writes to the Cosmos Resources container.
 | Read | Azure (RoleAssignmentsClient) | <ul><li>`GetByID` per pending role assignment -> exists / `RoleAssignmentNotFound`</li></ul> |
 | **Write** | **`ServiceProviderCluster`** | <ul><li>**`Status.AzureResources.RoleAssignments.PendingAzureResources`** = expected role assignment IDs not yet confirmed, recorded (and persisted) before the Azure Get; entries are removed as they are confirmed</li><li>**`Status.AzureResources.RoleAssignments.AzureResources`** = role assignment IDs confirmed to exist in Azure</li></ul> |
 
+#### AutoNodeEnabler
+
+**File:** [controller.go](../backend/pkg/controllers/cluster/autonode/controller.go)
+**Trigger:** Cluster informer + ApplyDesire informer, 5-minute resync
+**Behavior:** Turns the admin-set `Spec.DesiredAutoNodeEnabled` intent into a kube-applier `ApplyDesire` that server-side-applies `spec.autoNode` onto the existing HostedCluster, so the hypershift-operator rolls out the karpenter-operator. Writes no Cosmos resource fields — its only output is the ApplyDesire document. Skips while the cluster is deleting, while the Karpenter Azure client ID is unset (hypershift requires it once platform=Azure), before placement resolves, and until the HostedCluster has actually been observed via its ReadDesire. There is intentionally no coded disable path.
+
+| | Object | Fields |
+|---|--------|--------|
+| Read | `HCPOpenShiftCluster` | <ul><li>`ServiceProviderProperties.DeletionTimestamp` (gate: deletion is a no-op)</li><li>`ServiceProviderProperties.ClusterServiceID` (gate: required to build the HostedCluster target)</li><li>`CustomerProperties.DNS.BaseDomainPrefix` (gate: required to build the HostedCluster target)</li></ul> |
+| Read | `ServiceProviderCluster` | <ul><li>`Spec.DesiredAutoNodeEnabled` (gate: must be true)</li><li>`Spec.DesiredAutoNodeKarpenterAzureClientID` (gate: must be non-empty)</li><li>`Status.ManagementClusterResourceID` (gate: placement must be resolved)</li></ul> |
+| Read | ReadDesire (HostedCluster) | <ul><li>Existence only — the HostedCluster must be observed before applying a field onto it</li></ul> |
+| **Write** | **ApplyDesire** | <ul><li>Partial HostedCluster carrying **`spec.autoNode`** (server-side apply, field manager `aro-hcp-autonode`)</li></ul> |
+
+#### AutoNodeStatus
+
+**File:** [autonode_status_controller.go](../backend/pkg/controllers/cluster/autonode/autonode_status_controller.go)
+**Trigger:** Cluster informer, 5-minute resync
+**Behavior:** Mirrors the observed `HostedCluster.status.autoNode` onto `ServiceProviderCluster.Status.AutoNode`. Karpenter-provisioned nodes are not HyperShift NodePool machines and never appear in the ARM node pool list, so without this mirror nothing in Cosmos records how large a Karpenter-enabled cluster has grown; service-provider-side logic that scales with node count (for example control plane sizing) reads it from here. The counts are computed by the karpenter-operator against the guest cluster and published on `HostedControlPlane.status.autoNode`, which the hypershift-operator copies onto the HostedCluster — this controller only reads the already-mirrored HostedCluster, so no guest-cluster access is involved. An all-nil observed `status.autoNode` (what the hypershift-operator writes when AutoNode is disabled) maps to nil, so disabling clears the mirror. The new value is compared against the stored one before writing, because node counts churn on every scale event.
+
+| | Object | Fields |
+|---|--------|--------|
+| Read | `HCPOpenShiftCluster` | <ul><li>`ServiceProviderProperties.DeletionTimestamp` (gate: deletion is a no-op)</li></ul> |
+| Read | ReadDesire (HostedCluster) | <ul><li>`Status.AutoNode.NodeCount` / `NodeClaimCount` / `VCPUs`</li></ul> |
+| Read | `ServiceProviderCluster` | <ul><li>`Status.AutoNode` (compared before write to skip no-op replacements)</li></ul> |
+| **Write** | **`ServiceProviderCluster`** | <ul><li>**`Status.AutoNode`** = {NodeCount, NodeClaimCount, VCPUs}, or nil when AutoNode is disabled / not yet reported</li></ul> |
+
 ---
 
 ## 3. Execution Order Digraphs
@@ -1640,6 +1666,14 @@ Single writer. Read by [ClusterChildResourcesCleanupController](#clusterchildres
 | [ObserveRoleAssignments](#observeroleassignments) | Observe-only: while the cluster is not being deleted and the managed resource group is confirmed, records each expected control-plane / data-plane operator role assignment as `PendingAzureResources` before querying Azure, then moves it to `AzureResources` once Azure confirms it exists. Deletion is a no-op (the managed resource group deletion cascade removes the role assignments). |
 
 Single writer. Read by [OperationClusterCreate](#operationclustercreate) to gate cluster-create completion until at least one role assignment is confirmed and none remain pending.
+
+### `ServiceProviderCluster.Status.AutoNode`
+
+| Actor | When |
+|-------|------|
+| [AutoNodeStatus](#autonodestatus) | Observe-only: while the cluster is not being deleted and the HostedCluster has been observed via its ReadDesire, mirrors `HostedCluster.status.autoNode` (NodeCount / NodeClaimCount / VCPUs) here, and clears it back to nil when the hypershift-operator zeroes that status on AutoNode disable |
+
+Single writer. Not exposed on any versioned ARM API: Karpenter node counts are recorded for service-provider-side decisions only.
 
 ### `ServiceProviderCluster.Status.Validations`
 
