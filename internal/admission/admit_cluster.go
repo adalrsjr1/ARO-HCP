@@ -236,7 +236,7 @@ func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *Clus
 	var errs field.ErrorList
 
 	// Reject unrecognized experimental tags.
-	knownTags := sets.New(metadataapi.TagClusterSingleReplica, metadataapi.TagClusterSizeOverride, metadataapi.TagClusterCPOImageOverride, metadataapi.TagClusterControlPlaneExactVersion, metadataapi.TagClusterMaxCreationDuration, metadataapi.TagClusterMaxDeletionDuration)
+	knownTags := sets.New(metadataapi.TagClusterSingleReplica, metadataapi.TagClusterSizeOverride, metadataapi.TagClusterCPOImageOverride, metadataapi.TagClusterControlPlaneExactVersion, metadataapi.TagClusterMaxCreationDuration, metadataapi.TagClusterMaxDeletionDuration, metadataapi.TagClusterAutoNode)
 	for k := range tags {
 		if strings.HasPrefix(strings.ToLower(k), metadataapi.ExperimentalClusterTagPrefix) && !knownTags.Has(strings.ToLower(k)) {
 			errs = append(errs, field.Invalid(tagsPath.Key(k), k, "unrecognized experimental tag"))
@@ -269,6 +269,19 @@ func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *Clus
 		errs = append(errs, field.Invalid(
 			tagsPath.Key(metadataapi.TagClusterSizeOverride), sizeOverrideValue,
 			fmt.Sprintf("must be %q or empty", coreapi.MinimalControlPlanePodSizing),
+		))
+	}
+
+	autoNodeValue := lookupTag(tags, metadataapi.TagClusterAutoNode)
+	switch coreapi.AutoNodeMode(autoNodeValue) {
+	case coreapi.AutoNode:
+		experimentalFeatures.AutoNode = coreapi.AutoNode
+	case coreapi.DefaultAutoNodeMode:
+		// absent or empty
+	default:
+		errs = append(errs, field.Invalid(
+			tagsPath.Key(metadataapi.TagClusterAutoNode), autoNodeValue,
+			fmt.Sprintf("must be %q or empty", coreapi.AutoNode),
 		))
 	}
 

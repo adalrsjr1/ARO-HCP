@@ -60,6 +60,7 @@ func TestMutateCluster(t *testing.T) {
 		expectedControlPlaneAvailability  coreapi.ControlPlaneAvailability
 		expectedControlPlanePodSizing     coreapi.ControlPlanePodSizing
 		expectedControlPlaneOperatorImage string
+		expectedAutoNode                  coreapi.AutoNodeMode
 	}{
 		{
 			name:               "nil subscription ignores all tags",
@@ -238,6 +239,35 @@ func TestMutateCluster(t *testing.T) {
 			expectedControlPlaneOperatorImage: "quay.io/openshift/cpo:v1.0",
 		},
 		{
+			name:             "AFEC registered with autonode tag only",
+			subscription:     afecRegistered,
+			tags:             map[string]string{metadataapi.TagClusterAutoNode: string(coreapi.AutoNode)},
+			expectErrors:     []utils.ExpectedError{},
+			expectedAutoNode: coreapi.AutoNode,
+		},
+		{
+			name:         "AFEC registered but autonode tag has invalid value",
+			subscription: afecRegistered,
+			tags:         map[string]string{metadataapi.TagClusterAutoNode: "true"},
+			expectErrors: []utils.ExpectedError{
+				{FieldPath: "tags", Message: "Invalid value"},
+			},
+		},
+		{
+			name:               "no AFEC registered ignores autonode tag",
+			subscription:       noAFEC,
+			tags:               map[string]string{metadataapi.TagClusterAutoNode: string(coreapi.AutoNode)},
+			expectErrors:       []utils.ExpectedError{},
+			expectZeroFeatures: true,
+		},
+		{
+			name:             "AFEC registered with case insensitive autonode tag",
+			subscription:     afecRegistered,
+			tags:             map[string]string{"ARO-HCP.Experimental.Cluster.AutoNode": string(coreapi.AutoNode)},
+			expectErrors:     []utils.ExpectedError{},
+			expectedAutoNode: coreapi.AutoNode,
+		},
+		{
 			name:               "AFEC registered with max-creation-duration tag is recognized",
 			subscription:       afecRegistered,
 			tags:               map[string]string{metadataapi.TagClusterMaxCreationDuration: "19m"},
@@ -293,6 +323,10 @@ func TestMutateCluster(t *testing.T) {
 			if cluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneOperatorImage != tt.expectedControlPlaneOperatorImage {
 				t.Errorf("expected ControlPlaneOperatorImage %q, got %q",
 					tt.expectedControlPlaneOperatorImage, cluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneOperatorImage)
+			}
+			if cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode != tt.expectedAutoNode {
+				t.Errorf("expected AutoNode %q, got %q",
+					tt.expectedAutoNode, cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode)
 			}
 		})
 	}

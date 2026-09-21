@@ -44,6 +44,10 @@ type ExperimentalFeatures struct {
 	// upgrade control plane version controllers use this value directly as the
 	// desired control plane version and skip graph/gateway-based resolution.
 	ControlPlaneExactVersion *semver.Version `json:"controlPlaneExactVersion,omitempty"`
+
+	// AutoNode enables dynamic node provisioning (implemented via Karpenter)
+	// when set to AutoNode="Karpenter".
+	AutoNode AutoNodeMode `json:"autoNode,omitempty"`
 }
 
 // ControlPlaneAvailability controls the AvailabilityPolicy for control plane components.
@@ -60,4 +64,12 @@ type ControlPlanePodSizing string
 const (
 	DefaultControlPlanePodSizing ControlPlanePodSizing = ""
 	MinimalControlPlanePodSizing ControlPlanePodSizing = "Minimal"
+)
+
+// AutoNodeMode controls whether dynamic node provisioning is enabled for a cluster.
+type AutoNodeMode string
+
+const (
+	DefaultAutoNodeMode AutoNodeMode = ""
+	AutoNode            AutoNodeMode = "Karpenter"
 )
