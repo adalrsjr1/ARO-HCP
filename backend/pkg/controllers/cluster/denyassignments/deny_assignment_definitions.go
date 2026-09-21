@@ -32,6 +32,7 @@ const (
 	operatorKMS                    = "kms"
 	operatorIngress                = "ingress"
 	operatorCloudNetworkConfig     = "cloud-network-config"
+	operatorAutoNode               = "autonode"
 
 	denyAssignmentSuffixResources                = "resources-deny-assignment"
 	denyAssignmentSuffixDenyAllOtherRPs          = "deny-all-other-rps-deny-assignment"
@@ -67,6 +68,7 @@ type denyAssignmentDefinition struct {
 	notActions              []string
 	dataActions             []string
 	conditionalKMS          bool
+	conditionalAutoNode     bool
 }
 
 func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssignmentDefinition {
@@ -86,6 +88,7 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 			includeServiceManagedID: false,
 			actions:                 computeActions(),
 			notActions:              computeNotActions(),
+			conditionalAutoNode:     true,
 		},
 		{
 			denyAssignmentType:    denyAssignmentSuffixResourceHealth,
@@ -111,6 +114,7 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 			dataPlaneOperators:      []string{operatorDiskCSIDriver},
 			includeServiceManagedID: true,
 			actions:                 managedIdentityActions(),
+			conditionalAutoNode:     true,
 		},
 		{
 			denyAssignmentType:    denyAssignmentSuffixKeyVault,
@@ -144,6 +148,7 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 			controlPlaneOperators: []string{operatorClusterAPIAzure, operatorCloudControllerManager, operatorImageRegistry, operatorIngress, operatorCloudNetworkConfig, operatorDiskCSIDriver, operatorFileCSIDriver},
 			dataPlaneOperators:    []string{operatorImageRegistry, operatorFileCSIDriver, operatorDiskCSIDriver},
 			actions:               networkVirtualNetworksJoinActions(),
+			conditionalAutoNode:   true,
 		},
 		{
 			denyAssignmentType:      denyAssignmentSuffixNetworkLoadBalancing,
@@ -160,6 +165,15 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 			actions:                 networkPrivateConnectivityActions(),
 		},
 		{
+			// AutoNode's Virtual Machine Contributor role does grant
+			// networkSecurityGroups/join/action, needed only if the customer's
+			// subnet has an NSG attached to the NICs Karpenter creates. That's
+			// speculative rather than a documented requirement (unlike the VM/NIC/
+			// disk lifecycle, subnet join, and identity-assign actions excluded
+			// below), so this definition is deliberately left without
+			// conditionalAutoNode: under-scoping and revisiting later if a real
+			// NSG-attached-subnet scenario surfaces is safer than pre-emptively
+			// widening the exclusion on a guess.
 			denyAssignmentType:      denyAssignmentSuffixNetworkSecurityGroups,
 			controlPlaneOperators:   []string{operatorClusterAPIAzure, operatorCloudControllerManager, operatorControlPlane, operatorDiskCSIDriver, operatorFileCSIDriver},
 			dataPlaneOperators:      []string{operatorDiskCSIDriver, operatorFileCSIDriver},
@@ -178,6 +192,7 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 			dataPlaneOperators:    []string{operatorImageRegistry, operatorDiskCSIDriver},
 			actions:               networkInterfacesActions(),
 			notActions:            networkInterfacesNotActions(),
+			conditionalAutoNode:   true,
 		},
 		{
 			denyAssignmentType:    denyAssignmentSuffixNetworkPoliciesServices,
@@ -198,9 +213,13 @@ func denyAssignmentDefinitions(cluster *coreapi.HCPOpenShiftCluster) []denyAssig
 	}
 
 	// For KeyVault, conditionally add KMS operator exclusion
+	// For AutoNode, conditionally add Karpenter operator exclusion
 	for i := range defs {
 		if defs[i].conditionalKMS && isKMSEncryptionEnabled(cluster) {
 			defs[i].controlPlaneOperators = append(defs[i].controlPlaneOperators, operatorKMS)
+		}
+		if defs[i].conditionalAutoNode && isAutoNodeEnabled(cluster) {
+			defs[i].dataPlaneOperators = append(defs[i].dataPlaneOperators, operatorAutoNode)
 		}
 	}
 
@@ -232,4 +251,8 @@ func isKMSEncryptionEnabled(cluster *coreapi.HCPOpenShiftCluster) bool {
 	return cluster.CustomerProperties.Etcd.DataEncryption.KeyManagementMode == metadataapi.EtcdDataEncryptionKeyManagementModeTypeCustomerManaged &&
 		cluster.CustomerProperties.Etcd.DataEncryption.CustomerManaged != nil &&
 		cluster.CustomerProperties.Etcd.DataEncryption.CustomerManaged.Kms != nil
+}
+
+func isAutoNodeEnabled(cluster *coreapi.HCPOpenShiftCluster) bool {
+	return cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode == coreapi.AutoNode
 }

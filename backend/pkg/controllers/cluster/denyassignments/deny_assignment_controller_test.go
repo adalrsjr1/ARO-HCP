@@ -17,6 +17,7 @@ package denyassignments
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 
@@ -287,6 +289,35 @@ func TestGenerateDenyAssignmentUUIDMatchesClusterService(t *testing.T) {
 		"c4ff85a1-5daa-5ed4-b4e2-fdf60a7d24ad",
 		generateDenyAssignmentUUID("2abcdef1234567890abcdef123456789", "compute-deny-assignment"),
 		"deny assignment UUID derivation must not change (would desync from Cluster Service)")
+}
+
+func TestConditionalAutoNodeExclusion(t *testing.T) {
+	definitionsWithAutoNode := func(cluster *coreapi.HCPOpenShiftCluster) sets.Set[string] {
+		types := sets.New[string]()
+		for _, d := range denyAssignmentDefinitions(cluster) {
+			if slices.Contains(d.dataPlaneOperators, operatorAutoNode) {
+				types.Insert(d.denyAssignmentType)
+			}
+		}
+		return types
+	}
+
+	t.Run("AutoNode not enabled excludes no definitions", func(t *testing.T) {
+		cluster := newTestCluster()
+		assert.Empty(t, definitionsWithAutoNode(cluster).UnsortedList(),
+			"no deny assignment should exclude the autonode operator when AutoNode is not enabled")
+	})
+
+	t.Run("AutoNode enabled excludes the expected definitions", func(t *testing.T) {
+		cluster := newTestCluster(func(c *coreapi.HCPOpenShiftCluster) {
+			c.ServiceProviderProperties.ExperimentalFeatures.AutoNode = coreapi.AutoNode
+			c.CustomerProperties.Platform.OperatorsAuthentication.UserAssignedIdentities.DataPlaneOperators[operatorAutoNode] = testIdentityResourceID("dp-autonode")
+		})
+		assert.Equal(t,
+			sets.New(denyAssignmentSuffixCompute, denyAssignmentSuffixManagedIdentity, denyAssignmentSuffixNetworkVnetJoin, denyAssignmentSuffixNetworkInterfaces),
+			definitionsWithAutoNode(cluster),
+			"AutoNode's granted roles (VM Contributor, Network Contributor, Managed Identity Operator) require exclusion from exactly these deny assignments")
+	})
 }
 
 func TestResolvePrincipalID(t *testing.T) {
