@@ -332,6 +332,157 @@ func TestMutateCluster(t *testing.T) {
 	}
 }
 
+func TestMutateClusterExperimentalFeaturesAutoNodeUpdate(t *testing.T) {
+	afecRegistered := &coreapi.Subscription{
+		Properties: &coreapi.SubscriptionProperties{
+			RegisteredFeatures: &[]coreapi.Feature{
+				{
+					Name:  ptr.To(metadataapi.FeatureExperimentalReleaseFeatures),
+					State: ptr.To("Registered"),
+				},
+			},
+		},
+	}
+	noAFEC := &coreapi.Subscription{
+		Properties: &coreapi.SubscriptionProperties{},
+	}
+
+	tests := []struct {
+		name             string
+		subscription     *coreapi.Subscription
+		oldAutoNode      coreapi.AutoNodeMode
+		tags             map[string]string
+		expectErrors     []utils.ExpectedError
+		expectedAutoNode coreapi.AutoNodeMode
+	}{
+		{
+			// A genuinely-omitted tags field on a PATCH never reaches this function
+			// with the autonode key missing: decodeDesiredClusterPatch clones the
+			// old tags forward first. An explicit tags rewrite that drops the key
+			// is a real, distinguishable state, and is correctly treated the same
+			// as an explicit attempt to disable (see the "disable" case below).
+			name:         "explicit tags rewrite dropping the autonode key is rejected, same as disabling",
+			subscription: afecRegistered,
+			oldAutoNode:  coreapi.AutoNode,
+			tags:         map[string]string{},
+			expectErrors: []utils.ExpectedError{
+				{FieldPath: "tags", Message: "cannot be changed after cluster creation"},
+			},
+		},
+		{
+			name:             "AutoNode carried forward even when the AFEC is deregistered (Gap A)",
+			subscription:     noAFEC,
+			oldAutoNode:      coreapi.AutoNode,
+			tags:             map[string]string{},
+			expectErrors:     []utils.ExpectedError{},
+			expectedAutoNode: coreapi.AutoNode,
+		},
+		{
+			name:         "tag-driven attempt to newly enable AutoNode on update is rejected",
+			subscription: afecRegistered,
+			oldAutoNode:  coreapi.DefaultAutoNodeMode,
+			tags:         map[string]string{metadataapi.TagClusterAutoNode: string(coreapi.AutoNode)},
+			expectErrors: []utils.ExpectedError{
+				{FieldPath: "tags", Message: "cannot be changed after cluster creation"},
+			},
+		},
+		{
+			name:         "tag-driven attempt to disable AutoNode on update is rejected",
+			subscription: afecRegistered,
+			oldAutoNode:  coreapi.AutoNode,
+			tags:         map[string]string{metadataapi.TagClusterAutoNode: ""},
+			expectErrors: []utils.ExpectedError{
+				{FieldPath: "tags", Message: "cannot be changed after cluster creation"},
+			},
+		},
+		{
+			name:             "matching tag on update is a no-op",
+			subscription:     afecRegistered,
+			oldAutoNode:      coreapi.AutoNode,
+			tags:             map[string]string{metadataapi.TagClusterAutoNode: string(coreapi.AutoNode)},
+			expectErrors:     []utils.ExpectedError{},
+			expectedAutoNode: coreapi.AutoNode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldCluster := &coreapi.HCPOpenShiftCluster{}
+			oldCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode = tt.oldAutoNode
+
+			newCluster := &coreapi.HCPOpenShiftCluster{
+				TrackedResource: coreapi.TrackedResource{
+					Tags: tt.tags,
+				},
+			}
+			newCluster.ServiceProviderProperties.ExperimentalFeatures = oldCluster.ServiceProviderProperties.ExperimentalFeatures
+
+			admissionContext := &ClusterAdmissionContext{
+				Clock:           utilsclock.RealClock{},
+				Subscription:    tt.subscription,
+				OriginalCluster: newCluster.DeepCopy(),
+			}
+			errs := MutateCluster(context.Background(), admissionContext, operation.Operation{Type: operation.Update}, newCluster, oldCluster)
+
+			utils.VerifyErrorsMatch(t, tt.expectErrors, errs)
+
+			if len(tt.expectErrors) == 0 {
+				if newCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode != tt.expectedAutoNode {
+					t.Errorf("expected AutoNode %q, got %q",
+						tt.expectedAutoNode, newCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode)
+				}
+			}
+		})
+	}
+}
+
+// TestMutateClusterExperimentalFeaturesSiblingFieldsStayTagReactive pins that
+// carrying AutoNode forward on UPDATE (Gap B) does not clobber sibling
+// ExperimentalFeatures fields, which must remain fully tag-reactive.
+func TestMutateClusterExperimentalFeaturesSiblingFieldsStayTagReactive(t *testing.T) {
+	afecRegistered := &coreapi.Subscription{
+		Properties: &coreapi.SubscriptionProperties{
+			RegisteredFeatures: &[]coreapi.Feature{
+				{
+					Name:  ptr.To(metadataapi.FeatureExperimentalReleaseFeatures),
+					State: ptr.To("Registered"),
+				},
+			},
+		},
+	}
+
+	oldCluster := &coreapi.HCPOpenShiftCluster{}
+	oldCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode = coreapi.AutoNode
+	oldCluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneAvailability = coreapi.SingleReplicaControlPlane
+
+	// New request drops the single-replica tag but keeps the autonode tag: the
+	// sibling field must revert to its default, while AutoNode stays enabled.
+	newCluster := &coreapi.HCPOpenShiftCluster{
+		TrackedResource: coreapi.TrackedResource{
+			Tags: map[string]string{metadataapi.TagClusterAutoNode: string(coreapi.AutoNode)},
+		},
+	}
+	newCluster.ServiceProviderProperties.ExperimentalFeatures = oldCluster.ServiceProviderProperties.ExperimentalFeatures
+
+	admissionContext := &ClusterAdmissionContext{
+		Clock:           utilsclock.RealClock{},
+		Subscription:    afecRegistered,
+		OriginalCluster: newCluster.DeepCopy(),
+	}
+	errs := MutateCluster(context.Background(), admissionContext, operation.Operation{Type: operation.Update}, newCluster, oldCluster)
+
+	utils.VerifyErrorsMatch(t, []utils.ExpectedError{}, errs)
+
+	if newCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode != coreapi.AutoNode {
+		t.Errorf("expected AutoNode to remain %q, got %q",
+			coreapi.AutoNode, newCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode)
+	}
+	if newCluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneAvailability != coreapi.DefaultControlPlaneAvailability {
+		t.Errorf("expected ControlPlaneAvailability to revert to default, got %q",
+			newCluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneAvailability)
+	}
+}
+
 func TestMutateClusterControlPlaneExactVersion(t *testing.T) {
 	afecRegistered := &coreapi.Subscription{
 		Properties: &coreapi.SubscriptionProperties{

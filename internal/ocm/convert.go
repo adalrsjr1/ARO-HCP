@@ -81,6 +81,7 @@ const (
 	CSCIDRBlockAllowAccessModeAllowList string = "allow_list"
 	csOsDiskPersistencePersistent       string = "persistent"
 	csOsDiskPersistenceEphemeral        string = "ephemeral"
+	csAutoNodeModeEnabled               string = "enabled"
 	CSProvisionShardStatusActive        string = "active"
 	CSProvisionShardStatusMaintenance   string = "maintenance"
 	CSProvisionShardStatusOffline       string = "offline"
@@ -596,6 +597,16 @@ func withImmutableAttributes(clusterBuilder *arohcpv1alpha1.ClusterBuilder, hcpC
 	// Cluster Service rejects an empty DomainPrefix string.
 	if hcpCluster.CustomerProperties.DNS.BaseDomainPrefix != "" {
 		clusterBuilder.DomainPrefix(hcpCluster.CustomerProperties.DNS.BaseDomainPrefix)
+	}
+
+	// AutoNode is create-only: it is deliberately excluded from
+	// clusterUpdateDispatchConfig (see that file's header comment), since until
+	// Cluster Service persists and returns it on GET, diffing it there would show
+	// permanent drift. mutateClusterExperimentalFeatures (internal/admission) makes
+	// ExperimentalFeatures.AutoNode sticky post-create so this create-only signal
+	// never needs a matching update path.
+	if hcpCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode == coreapi.AutoNode {
+		clusterBuilder.AutoNode(arohcpv1alpha1.NewClusterAutoNode().Mode(csAutoNodeModeEnabled))
 	}
 
 	return clusterBuilder, azureBuilder, nil

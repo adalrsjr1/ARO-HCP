@@ -1257,6 +1257,47 @@ func TestBuildCSCluster(t *testing.T) {
 							),
 						))),
 		},
+		{
+			name: "CREATE - sets AutoNode when enabled",
+			hcpCluster: &coreapi.HCPOpenShiftCluster{
+				ServiceProviderProperties: coreapi.HCPOpenShiftClusterServiceProviderProperties{
+					ExperimentalFeatures: coreapi.ExperimentalFeatures{
+						AutoNode: coreapi.AutoNode,
+					},
+				},
+			},
+			expectedCSCluster: getBaseCSClusterBuilder(false).
+				AutoNode(arohcpv1alpha1.NewClusterAutoNode().Mode(csAutoNodeModeEnabled)),
+		},
+		{
+			name: "CREATE - does not set AutoNode by default",
+			hcpCluster: &coreapi.HCPOpenShiftCluster{
+				CustomerProperties: coreapi.HCPOpenShiftClusterCustomerProperties{
+					API: coreapi.CustomerAPIProfile{
+						AuthorizedCIDRs: nil,
+					},
+				},
+			},
+			expectedCSCluster: getBaseCSClusterBuilder(false),
+		},
+		{
+			name: "UPDATE - never sets AutoNode, even when the RP-side flag is enabled",
+			oldClusterServiceCluster: func() *arohcpv1alpha1.Cluster {
+				c, err := arohcpv1alpha1.NewCluster().Build()
+				if err != nil {
+					panic(err)
+				}
+				return c
+			}(),
+			hcpCluster: &coreapi.HCPOpenShiftCluster{
+				ServiceProviderProperties: coreapi.HCPOpenShiftClusterServiceProviderProperties{
+					ExperimentalFeatures: coreapi.ExperimentalFeatures{
+						AutoNode: coreapi.AutoNode,
+					},
+				},
+			},
+			expectedCSCluster: getBaseCSClusterBuilder(true),
+		},
 	}
 
 	for _, tc := range testCases {
