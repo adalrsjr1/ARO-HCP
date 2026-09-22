@@ -31,15 +31,15 @@ import (
 	"github.com/Azure/ARO-HCP/test/util/verifiers"
 )
 
-// This test only exercises the enablement signal (AFEC-gated tag ->
-// ExperimentalFeatures.AutoNode projection, admit_cluster.go) and confirms
-// the cluster still comes up healthy with it set. AutoNode's downstream
-// pieces (a customer-supplied "autonode" data-plane operator identity per
-// ClusterOperatorIdentifierAutoNode in
-// internal/azure/cluster_scoped_identities_config.go, CS delivery of that
-// identity, and the Karpenter delivery bridge) are not wired up yet, so
-// there is no real Karpenter behavior to assert on here. Extend this test
-// once that identity plumbing lands.
+// This test exercises the enablement signal (AFEC-gated tag ->
+// ExperimentalFeatures.AutoNode projection, admit_cluster.go) plus the
+// "autonode" data-plane operator identity per ClusterOperatorIdentifierAutoNode
+// in internal/azure/cluster_scoped_identities_config.go, and confirms the
+// cluster still comes up healthy with both set. AutoNode's remaining
+// downstream pieces (CS delivery/consumption of that identity and the
+// Karpenter delivery bridge) are not wired up yet, so there is no real
+// Karpenter behavior to assert on here. Extend this test once that plumbing
+// lands.
 var _ = Describe("Customer", func() {
 	It("should be able to enable AutoNode via the experimental tag for a cluster with version >= 4.22",
 		labels.RequireNothing, labels.Medium, labels.Positive, labels.AroRpApiCompatible, labels.CreateCluster,
@@ -93,6 +93,12 @@ var _ = Describe("Customer", func() {
 				framework.RBACScopeResourceGroup,
 			)
 			Expect(err).NotTo(HaveOccurred(), "failed to create customer resources for AutoNode enablement cluster")
+
+			By("verifying the autonode data-plane operator identity was provisioned")
+			Expect(clusterParams.UserAssignedIdentitiesProfile).NotTo(BeNil(), "UserAssignedIdentitiesProfile should be populated after creating customer resources")
+			autoNodeIdentityID := clusterParams.UserAssignedIdentitiesProfile.DataPlaneOperators["autonode"]
+			Expect(autoNodeIdentityID).NotTo(BeNil(), "DataPlaneOperators should contain an \"autonode\" identity")
+			Expect(*autoNodeIdentityID).NotTo(BeEmpty(), "autonode data-plane identity resource ID should not be empty")
 
 			By("creating the HCP cluster with the AutoNode tag set")
 			err = tc.CreateHCPClusterFromParam20260630(

@@ -29,6 +29,7 @@ type ManagedIdentities = {
   dpDiskCsiDriverMiName: string
   dpFileCsiDriverMiName: string
   dpImageRegistryMiName: string
+  dpAutoNodeMiName: string
   serviceManagedIdentityName: string
 }
 

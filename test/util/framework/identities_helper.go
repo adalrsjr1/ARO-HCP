@@ -66,6 +66,7 @@ const (
 	DpFileCsiDriverMiName        = "dp-file-csi-driver"
 	DpImageRegistryMiName        = "dp-image-registry"
 	ServiceManagedIdentityName   = "service"
+	DpAutoNodeMiName             = "dp-autonode"
 )
 
 type LeasedIdentityPool struct {
@@ -87,6 +88,7 @@ type Identities struct {
 	DpFileCsiDriverMiName        string `json:"dpFileCsiDriverMiName"`
 	DpImageRegistryMiName        string `json:"dpImageRegistryMiName"`
 	ServiceManagedIdentityName   string `json:"serviceManagedIdentityName"`
+	DpAutoNodeMiName             string `json:"dpAutoNodeMiName"`
 }
 
 func (i Identities) ToSlice() []string {
@@ -104,6 +106,7 @@ func (i Identities) ToSlice() []string {
 		i.DpFileCsiDriverMiName,
 		i.DpImageRegistryMiName,
 		i.ServiceManagedIdentityName,
+		i.DpAutoNodeMiName,
 	}
 }
 
@@ -122,6 +125,7 @@ func NewDefaultIdentities() Identities {
 		DpFileCsiDriverMiName:        DpFileCsiDriverMiName,
 		DpImageRegistryMiName:        DpImageRegistryMiName,
 		ServiceManagedIdentityName:   ServiceManagedIdentityName,
+		DpAutoNodeMiName:             DpAutoNodeMiName,
 	}
 }
 
@@ -140,6 +144,7 @@ func NewDefaultIdentitiesWithSuffix(suffix string) Identities {
 		DpFileCsiDriverMiName:        fmt.Sprintf("%s-%s", DpFileCsiDriverMiName, suffix),
 		DpImageRegistryMiName:        fmt.Sprintf("%s-%s", DpImageRegistryMiName, suffix),
 		ServiceManagedIdentityName:   fmt.Sprintf("%s-%s", ServiceManagedIdentityName, suffix),
+		DpAutoNodeMiName:             fmt.Sprintf("%s-%s", DpAutoNodeMiName, suffix),
 	}
 }
 

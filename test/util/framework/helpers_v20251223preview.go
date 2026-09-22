@@ -228,6 +228,7 @@ func BuildIdentityParamsFromNames(
 			"disk-csi-driver": id(identities.DpDiskCsiDriverMiName),
 			"file-csi-driver": id(identities.DpFileCsiDriverMiName),
 			"image-registry":  id(identities.DpImageRegistryMiName),
+			"autonode":        id(identities.DpAutoNodeMiName),
 		},
 		ServiceManagedIdentity: id(identities.ServiceManagedIdentityName),
 	}
