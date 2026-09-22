@@ -1806,3 +1806,70 @@ func TestCSErrorToCloudError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsOCMErrorTerminal(t *testing.T) {
+	ocmErrorWithStatus := func(status int) error {
+		e, err := ocmerrors.NewError().Status(status).Reason("test reason").Build()
+		require.NoError(t, err)
+		return e
+	}
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error is not terminal",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "non-OCM error is not terminal",
+			err:      errors.New("some other error"),
+			expected: false,
+		},
+		{
+			name:     "400 Bad Request is terminal",
+			err:      ocmErrorWithStatus(http.StatusBadRequest),
+			expected: true,
+		},
+		{
+			name:     "403 Forbidden is terminal",
+			err:      ocmErrorWithStatus(http.StatusForbidden),
+			expected: true,
+		},
+		{
+			name:     "404 Not Found is terminal",
+			err:      ocmErrorWithStatus(http.StatusNotFound),
+			expected: true,
+		},
+		{
+			name:     "408 Request Timeout is not terminal",
+			err:      ocmErrorWithStatus(http.StatusRequestTimeout),
+			expected: false,
+		},
+		{
+			name:     "429 Too Many Requests is not terminal",
+			err:      ocmErrorWithStatus(http.StatusTooManyRequests),
+			expected: false,
+		},
+		{
+			name:     "500 Internal Server Error is not terminal",
+			err:      ocmErrorWithStatus(http.StatusInternalServerError),
+			expected: false,
+		},
+		{
+			name:     "503 Service Unavailable is not terminal",
+			err:      ocmErrorWithStatus(http.StatusServiceUnavailable),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, IsOCMErrorTerminal(tt.err))
+		})
+	}
+}

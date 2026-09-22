@@ -770,6 +770,24 @@ func CSErrorToCloudError(err error, resourceID *azcorearm.ResourceID) *coreapi.C
 	return coreapi.NewInternalServerError()
 }
 
+// IsOCMErrorTerminal reports whether err is a Cluster Service error that will
+// never succeed on retry: a 4xx status other than 408 Request Timeout or 429
+// Too Many Requests, both of which are worth retrying. Controllers that
+// receive a terminal error from a create/update call should stop treating it
+// as transient (e.g. log it loudly) rather than silently retrying until an
+// unrelated deadline trips.
+func IsOCMErrorTerminal(err error) bool {
+	var ocmError *ocmerrors.Error
+	if !errors.As(err, &ocmError) {
+		return false
+	}
+	status := ocmError.Status()
+	if status < http.StatusBadRequest || status >= http.StatusInternalServerError {
+		return false
+	}
+	return status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+}
+
 // ConvertCSManagementClusterToInternal converts a Cluster Service ProvisionShard
 // to the internal ManagementCluster representation.
 func ConvertCSManagementClusterToInternal(csShard *arohcpv1alpha1.ProvisionShard) (*fleetapi.ManagementCluster, error) {
