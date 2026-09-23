@@ -12,19 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package autonode implements a validation-only backend controller that
-// turns ServiceProviderClusterSpec.DesiredAutoNodeEnabled (set via the admin
-// API) into a kube-applier ApplyDesire that server-side-applies
-// spec.autoNode onto the cluster's existing HostedCluster object. This
-// triggers the hypershift-operator to deploy the karpenter-operator, letting
-// us validate the custom hypershift-operator's Karpenter support end-to-end
-// without any of the production wiring (ARM API field, Cluster Service,
-// identity provisioning) that a real AutoNode feature would need.
+// Package autonode implements the backend controller that turns a cluster's
+// AutoNode enablement into a kube-applier ApplyDesire that server-side-applies
+// spec.autoNode onto the cluster's existing HostedCluster object, triggering
+// the hypershift-operator to deploy the karpenter-operator.
 //
-// There is intentionally no coded disable path: this is a POC, not a
-// feature, and a manual retirement runbook covers cleanup. See the plan
-// document referenced from the originating design discussion for the full
-// rationale and the runbook steps.
+// The primary trigger is Cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode,
+// the sticky/immutable-post-create AFEC-gated feature flag. A cluster's
+// AutoNode enablement DECISION is create-time and immutable: it is set once
+// (via admission) and never changes for the life of the cluster, which is
+// why there is no coded disable path here - there is nothing to disable.
+// ServiceProviderClusterSpec.DesiredAutoNodeEnabled/DesiredAutoNodeKarpenterAzureClientID
+// (set via the admin API) remain a temporary parallel trigger and a
+// break-glass client-ID fallback respectively, retained only until the
+// automatic path has a real observation window (see the retirement runbook
+// referenced from the originating design discussion).
+//
+// The DELIVERY MECHANISM this decision drives is, mechanically, an ordinary
+// day-2 controller: it waits for the HostedCluster to actually exist (via the
+// ReadDesire mirror) before it can SSA anything onto it, and it re-applies on
+// every relevant resync - the same shape as autoscaler config or any other
+// post-create HostedCluster field. Do not confuse "the decision is
+// create-time-immutable" with "the write only ever happens once"; only the
+// former is true.
 package autonode
 
 import (
@@ -140,7 +150,14 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 		return utils.TrackError(fmt.Errorf("failed to get cached ServiceProviderCluster: %w", err))
 	}
 
-	if serviceProviderCluster.Spec.DesiredAutoNodeEnabled == nil || !*serviceProviderCluster.Spec.DesiredAutoNodeEnabled {
+	// Primary trigger: the sticky, AFEC-gated, create-time-immutable
+	// experimental feature. The admin-set DesiredAutoNodeEnabled field is a
+	// temporary parallel trigger, retained only until the automatic path has
+	// a real observation window (see the retirement runbook referenced in
+	// the package doc).
+	autoNodeRequested := existingCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode == coreapi.AutoNode ||
+		(serviceProviderCluster.Spec.DesiredAutoNodeEnabled != nil && *serviceProviderCluster.Spec.DesiredAutoNodeEnabled)
+	if !autoNodeRequested {
 		return nil
 	}
 
@@ -210,6 +227,19 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 		return utils.TrackError(fmt.Errorf("get ApplyDesire CRUD: %w", err))
 	}
 
+	// This SSA relies on two facts verified against real hypershift/CS
+	// source, not assumed - re-verify both on any future hypershift/api
+	// bump in this repo, or a bump to the pinned version CS uses:
+	//   (a) hypershift-operator copies HostedCluster.spec.autoNode onto
+	//       HostedControlPlane.spec.autoNode on every reconcile, not only at
+	//       creation, so applying to an already-existing HostedCluster takes
+	//       effect the same as applying at creation time.
+	//   (b) every ARO-HCP HostedCluster already has Azure SubnetID and
+	//       ResourceGroupName populated unconditionally (CS sets both as
+	//       part of the mandatory Azure platform block), which the
+	//       karpenter-operator's CPO adapter hard-requires once a Karpenter
+	//       ClientID is set - so no additional guard for those fields is
+	//       needed here.
 	target := controllerutils.HostedClusterTarget(s.hostedClusterNamespaceEnvIdentifier, csClusterID, csClusterDomainPrefix)
 	desire, err := buildAutoNodeApplyDesire(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, mcResourceID, target, clientID)
 	if err != nil {

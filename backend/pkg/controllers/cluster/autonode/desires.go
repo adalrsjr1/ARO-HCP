@@ -32,18 +32,19 @@ import (
 )
 
 // autoNodeApplyDesireName is the well-known, single ApplyDesire name this
-// controller writes per cluster. There is only ever one: this is a
-// validation-only POC that sets a single field (spec.autoNode) on the
-// existing HostedCluster, not a family of desires like the backup schedules.
+// controller writes per cluster. There is only ever one: this controller
+// sets a single field (spec.autoNode) on the existing HostedCluster, not a
+// family of desires like the backup schedules.
 const autoNodeApplyDesireName = "autonode-karpenter-poc"
 
 // autoNodeFieldManager is a dedicated, non-default field manager for this
-// POC's server-side-apply writes. Using a distinct manager (rather than
-// kube-applier's default) keeps ownership of spec.autoNode clearly
-// attributable to this validation path, separate from any legacy writer
-// that may still be reconciling the rest of the HostedCluster object, and
-// makes manual field removal during retirement unambiguous (see the
-// operator runbook: `kubectl patch ... --field-manager=aro-hcp-autonode-validation`
+// controller's server-side-apply writes. Using a distinct manager (rather
+// than kube-applier's default) keeps ownership of spec.autoNode clearly
+// attributable to this controller, separate from any other writer that may
+// still be reconciling the rest of the HostedCluster object (e.g. CS's
+// ManifestWork - see the package-level comment on autoNodeSpec for why that
+// doesn't conflict), and makes manual field removal unambiguous if ever
+// needed (`kubectl patch ... --field-manager=aro-hcp-autonode-validation`
 // style removal, not ad hoc edits).
 const autoNodeFieldManager = "aro-hcp-autonode-validation"
 
@@ -70,17 +71,29 @@ type partialHostedClusterSpec struct {
 
 // autoNodeSpec, provisionerConfigSpec, karpenterConfigSpec, and
 // karpenterAzureConfigSpec are local mirrors of the equivalent types in the
-// custom hypershift-operator fork under validation
-// (/home/asampaio/Coding/tmp-karpenter/hypershift, api/hypershift/v1beta1/hostedcluster_types.go:
-// AutoNode, ProvisionerConfig, KarpenterConfig, KarpenterAzureConfig). They
-// are defined locally, rather than imported from hsv1beta1, because the
-// pinned github.com/openshift/hypershift/api dependency in backend/go.mod is
-// stock upstream hypershift, whose KarpenterConfig only supports AWS — it
-// has no Azure field or AzureClientID type. Pointing go.mod at the custom
-// fork (via a replace directive) would be exactly the kind of production
-// wiring change this validation effort is explicitly avoiding, so we instead
-// hand-marshal JSON matching the fork's wire schema. Field names/json tags
-// must be kept in sync with the fork if its AutoNode schema changes.
+// custom hypershift-operator fork that adds Azure support
+// (api/hypershift/v1beta1/hostedcluster_types.go: AutoNode, ProvisionerConfig,
+// KarpenterConfig, KarpenterAzureConfig). They are defined locally, rather
+// than imported from hsv1beta1, because no published github.com/openshift/hypershift/api
+// version has the Azure member yet — stock upstream's KarpenterConfig only
+// supports AWS. The only fork that has it requires go 1.26.0 / k8s.io/api
+// v0.36.2, versus this workspace's go 1.25.7 / k8s.io/api v0.35.3 across the
+// full go.work; a replace directive would drag the entire 40-module workspace
+// to a new toolchain for one field, and would still point at an unpublished
+// personal branch. Hand-marshaling this small a shape is materially cheaper
+// than that, and it's safe: CS (which builds the full typed HostedCluster for
+// its own ManifestWork) never contends for this field, because its pinned
+// AutoNode struct field uses `json:"autoNode,omitzero"` — a zero-valued
+// AutoNode is correctly omitted from the wire payload — and CS's ManifestWork
+// uses server-side-apply, so an omitted field doesn't clobber this
+// controller's write. Both of those facts must be re-verified on any future
+// hypershift/api version bump in either this repo or CS: a switch to
+// `omitempty` (which never omits a non-pointer struct) or CS moving off SSA
+// would silently make CS a competing owner of spec.autoNode.
+// Revisit hand-marshaling once the Azure field merges upstream on a version
+// this workspace can pin without a toolchain bump — at that point this
+// becomes a one-file change back to importing hsv1beta1 directly. Field
+// names/json tags here must be kept in sync with the fork's schema until then.
 type autoNodeSpec struct {
 	Provisioner provisionerConfigSpec `json:"provisionerConfig"`
 }

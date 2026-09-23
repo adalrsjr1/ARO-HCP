@@ -100,6 +100,15 @@ func testAutoNodeIdentityResourceID() *azcorearm.ResourceID {
 	))
 }
 
+func withExperimentalAutoNode(c *coreapi.HCPOpenShiftCluster) {
+	c.ServiceProviderProperties.ExperimentalFeatures.AutoNode = coreapi.AutoNode
+}
+
+func withoutAdminAutoNodeFields(spc *coreapi.ServiceProviderCluster) {
+	spc.Spec.DesiredAutoNodeEnabled = nil
+	spc.Spec.DesiredAutoNodeKarpenterAzureClientID = nil
+}
+
 func newTestServiceProviderCluster(opts ...func(*coreapi.ServiceProviderCluster)) *coreapi.ServiceProviderCluster {
 	serviceProviderClusterResourceID := metadataapi.Must(azcorearm.ParseResourceID(
 		testClusterResourceID().String() + "/" + coreapi.ServiceProviderClusterResourceTypeName + "/" + coreapi.ServiceProviderClusterResourceName,
@@ -221,6 +230,28 @@ func TestAutoNodeSyncer_SyncOnce_NotReady(t *testing.T) {
 			})},
 		},
 		{
+			name: "ExperimentalFeatures.AutoNode set but identity not yet resolved, no admin fallback",
+			clusters: []*coreapi.HCPOpenShiftCluster{newTestCluster(
+				withExperimentalAutoNode,
+				withAutoNodeIdentity,
+			)},
+			serviceProviderClusters: []*coreapi.ServiceProviderCluster{newTestServiceProviderCluster(withoutAdminAutoNodeFields)},
+		},
+		{
+			name: "ExperimentalFeatures.AutoNode set but cluster is being deleted",
+			clusters: []*coreapi.HCPOpenShiftCluster{newTestCluster(
+				withExperimentalAutoNode,
+				withAutoNodeIdentity,
+				func(c *coreapi.HCPOpenShiftCluster) {
+					c.ServiceProviderProperties.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+				},
+			)},
+			serviceProviderClusters: []*coreapi.ServiceProviderCluster{newTestServiceProviderCluster(
+				withoutAdminAutoNodeFields,
+				withResolvedAutoNodeClientID(testResolvedClientID),
+			)},
+		},
+		{
 			name:     "no management cluster resource ID yet",
 			clusters: []*coreapi.HCPOpenShiftCluster{newTestCluster()},
 			serviceProviderClusters: []*coreapi.ServiceProviderCluster{newTestServiceProviderCluster(func(spc *coreapi.ServiceProviderCluster) {
@@ -269,6 +300,40 @@ func TestAutoNodeSyncer_SyncOnce_NotReady(t *testing.T) {
 			assert.Error(t, err, "no ApplyDesire should have been written")
 		})
 	}
+}
+
+// TestAutoNodeSyncer_SyncOnce_AutomaticTriggerCreatesApplyDesire pins that the
+// primary, production trigger (ExperimentalFeatures.AutoNode, sticky and
+// AFEC-gated) drives delivery entirely on its own - no admin-set field
+// involved at all - once the cluster's "autonode" data-plane identity has
+// resolved.
+func TestAutoNodeSyncer_SyncOnce_AutomaticTriggerCreatesApplyDesire(t *testing.T) {
+	ctx := utils.ContextWithLogger(context.Background(), testr.New(t))
+
+	mockKubeApplier := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClient()
+	mockClients := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClients()
+	mockClients.Register(testMgmtClusterResourceID(), mockKubeApplier)
+	seedHostedClusterReadDesire(t, ctx, mockKubeApplier)
+
+	syncer := newTestSyncer(
+		[]*coreapi.HCPOpenShiftCluster{newTestCluster(withExperimentalAutoNode, withAutoNodeIdentity)},
+		[]*coreapi.ServiceProviderCluster{newTestServiceProviderCluster(
+			withoutAdminAutoNodeFields,
+			withResolvedAutoNodeClientID(testResolvedClientID),
+		)},
+		mockClients,
+	)
+
+	require.NoError(t, syncer.SyncOnce(ctx, testKey()))
+
+	applyDesireCRUD, err := mockKubeApplier.ApplyDesiresForCluster(testSub, testRG, testClusterName)
+	require.NoError(t, err)
+	applyDesire, err := applyDesireCRUD.Get(ctx, autoNodeApplyDesireName)
+	require.NoError(t, err, "expected ApplyDesire to have been created from the automatic trigger alone")
+
+	var payload partialHostedCluster
+	require.NoError(t, json.Unmarshal(applyDesire.Spec.ServerSideApply.KubeContent.Raw, &payload))
+	assert.Equal(t, testResolvedClientID, payload.Spec.AutoNode.Provisioner.Karpenter.Azure.ClientID)
 }
 
 func TestAutoNodeSyncer_SyncOnce_CreatesApplyDesire(t *testing.T) {
