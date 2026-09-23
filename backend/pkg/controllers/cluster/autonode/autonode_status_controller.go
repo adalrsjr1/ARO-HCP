@@ -28,6 +28,7 @@ import (
 	"github.com/Azure/ARO-HCP/backend/pkg/kubeapplierhelpers"
 	"github.com/Azure/ARO-HCP/backend/pkg/utils/controllerutils"
 	"github.com/Azure/ARO-HCP/internal/api/coreapi"
+	"github.com/Azure/ARO-HCP/internal/api/kubeapplierapi"
 	controllerutil "github.com/Azure/ARO-HCP/internal/controllerutils"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/corecosmosstorage"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/cosmosstorageutils"
@@ -58,6 +59,7 @@ const AutoNodeStatusControllerName = "AutoNodeStatus"
 type autoNodeStatusSyncer struct {
 	resourcesDBClient            corecosmosstorage.ResourcesDBClient
 	readDesireLister             kubeapplierlisters.ReadDesireLister
+	applyDesireLister            kubeapplierlisters.ApplyDesireLister
 	serviceProviderClusterLister corelisters.ServiceProviderClusterLister
 }
 
@@ -73,9 +75,12 @@ func NewAutoNodeStatusController(
 	kubeApplierInformers *unionkubeapplierinformers.UnionKubeApplierInformers,
 	readDesireLister kubeapplierlisters.ReadDesireLister,
 ) controllerutils.Controller {
+	_, applyDesireLister := kubeApplierInformers.ApplyDesires()
+
 	syncer := &autoNodeStatusSyncer{
 		resourcesDBClient:            resourcesDBClient,
 		readDesireLister:             readDesireLister,
+		applyDesireLister:            applyDesireLister,
 		serviceProviderClusterLister: serviceProviderClusterLister,
 	}
 
@@ -113,6 +118,25 @@ func (c *autoNodeStatusSyncer) SyncOnce(ctx context.Context, key controllerutils
 
 	newAutoNode := autoNodeStatusFromHostedCluster(hostedCluster)
 
+	// Surface a stuck AutoNode ApplyDesire (e.g. a management cluster whose
+	// HostedCluster CRD predates the Azure Karpenter field, which the
+	// kube-apiserver rejects outright rather than silently pruning - see the
+	// AutoNodeEnabler package doc) into this same mirror. Without this, a
+	// delivery failure that never even reaches the HostedCluster object
+	// produces nothing in Cosmos at all: newAutoNode would stay nil forever
+	// with no way to tell "not requested" apart from "requested but
+	// rejected" short of reading the ApplyDesire directly on the management
+	// cluster. Per the product contract (see the package doc): a failed
+	// delivery does not fail cluster provisioning, but must be visible here.
+	if deliveryCondition, err := c.autoNodeDeliveryCondition(ctx, key); err != nil {
+		return utils.TrackError(fmt.Errorf("failed to get AutoNode ApplyDesire: %w", err))
+	} else if deliveryCondition != nil {
+		if newAutoNode == nil {
+			newAutoNode = &coreapi.ServiceProviderClusterAutoNodeStatus{}
+		}
+		newAutoNode.DeliveryCondition = deliveryCondition
+	}
+
 	cachedServiceProviderCluster, err := c.serviceProviderClusterLister.Get(ctx, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
 	if cosmosstorageutils.IsNotFoundError(err) {
 		// CreateServiceProviderCluster will populate it; we'll be re-enqueued
@@ -141,6 +165,38 @@ func (c *autoNodeStatusSyncer) SyncOnce(ctx context.Context, key controllerutils
 	}
 
 	return nil
+}
+
+// autoNodeDeliveryCondition returns the distilled form of the AutoNode
+// ApplyDesire's own SuccessfullyApplied (falling back to the legacy
+// Successful) condition, but only when that condition is present and not
+// True - a healthy or not-yet-observed delivery reports nil, since
+// autoNodeStatusFromHostedCluster's HostedCluster-derived Condition already
+// covers the healthy case once the object has actually been reconciled.
+func (c *autoNodeStatusSyncer) autoNodeDeliveryCondition(ctx context.Context, key controllerutils.HCPClusterKey) (*coreapi.ServiceProviderClusterAutoNodeCondition, error) {
+	applyDesire, err := c.applyDesireLister.GetForCluster(ctx, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, autoNodeApplyDesireName)
+	if cosmosstorageutils.IsNotFoundError(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var deliveryCondition *metav1.Condition
+	for _, conditionType := range []string{kubeapplierapi.ConditionTypeSuccessfullyApplied, kubeapplierapi.ConditionTypeSuccessful} {
+		if c := meta.FindStatusCondition(applyDesire.Status.Conditions, conditionType); c != nil {
+			deliveryCondition = c
+			break
+		}
+	}
+	if deliveryCondition == nil || deliveryCondition.Status == metav1.ConditionTrue {
+		return nil, nil
+	}
+	return &coreapi.ServiceProviderClusterAutoNodeCondition{
+		Status:  string(deliveryCondition.Status),
+		Reason:  deliveryCondition.Reason,
+		Message: deliveryCondition.Message,
+	}, nil
 }
 
 // autoNodeStatusFromHostedCluster distills the observed

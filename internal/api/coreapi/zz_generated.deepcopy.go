@@ -2080,6 +2080,11 @@ func (in *ServiceProviderClusterAutoNodeStatus) DeepCopyInto(out *ServiceProvide
 		*out = new(ServiceProviderClusterAutoNodeCondition)
 		**out = **in
 	}
+	if in.DeliveryCondition != nil {
+		in, out := &in.DeliveryCondition, &out.DeliveryCondition
+		*out = new(ServiceProviderClusterAutoNodeCondition)
+		**out = **in
+	}
 	if in.NodeCount != nil {
 		in, out := &in.NodeCount, &out.NodeCount
 		*out = new(int32)

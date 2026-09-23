@@ -114,10 +114,33 @@ func newAutoNodeReadDesireWithCondition(t *testing.T, autoNode hyperv1beta1.Auto
 	}
 }
 
-func newStatusTestSyncer(db *corecosmosstoragetesting.MockResourcesDBClient, desires []*kubeapplierapi.ReadDesire) *autoNodeStatusSyncer {
+// newAutoNodeApplyDesire builds the AutoNodeEnabler's ApplyDesire document
+// carrying the given status conditions, for pinning how AutoNodeStatus
+// surfaces a stuck/rejected delivery.
+func newAutoNodeApplyDesire(conditions ...metav1.Condition) *kubeapplierapi.ApplyDesire {
+	adResourceIDStr := kubeapplierapi.ToClusterScopedApplyDesireResourceIDString(
+		testSub, testRG, testClusterName, autoNodeApplyDesireName,
+	)
+	return &kubeapplierapi.ApplyDesire{
+		CosmosMetadata: coreapi.CosmosMetadata{
+			ResourceID:   metadataapi.Must(azcorearm.ParseResourceID(adResourceIDStr)),
+			PartitionKey: strings.ToLower(testMgmtClusterResourceID().String()),
+		},
+		Status: kubeapplierapi.ApplyDesireStatus{
+			Conditions: conditions,
+		},
+	}
+}
+
+func newStatusTestSyncer(
+	db *corecosmosstoragetesting.MockResourcesDBClient,
+	desires []*kubeapplierapi.ReadDesire,
+	applyDesires ...*kubeapplierapi.ApplyDesire,
+) *autoNodeStatusSyncer {
 	return &autoNodeStatusSyncer{
 		resourcesDBClient:            db,
 		readDesireLister:             &kubeapplierlistertesting.SliceReadDesireLister{Desires: desires},
+		applyDesireLister:            &kubeapplierlistertesting.SliceApplyDesireLister{Desires: applyDesires},
 		serviceProviderClusterLister: &corelistertesting.DBServiceProviderClusterLister{ResourcesDBClient: db},
 	}
 }
@@ -131,10 +154,11 @@ func getStoredAutoNode(t *testing.T, ctx context.Context, db *corecosmosstoraget
 
 func TestAutoNodeStatusSyncer_SyncOnce(t *testing.T) {
 	tests := []struct {
-		name     string
-		seed     func(t *testing.T, ctx context.Context, db *corecosmosstoragetesting.MockResourcesDBClient, opts ...func(*coreapi.HCPOpenShiftCluster))
-		desires  func(t *testing.T) []*kubeapplierapi.ReadDesire
-		expected *coreapi.ServiceProviderClusterAutoNodeStatus
+		name         string
+		seed         func(t *testing.T, ctx context.Context, db *corecosmosstoragetesting.MockResourcesDBClient, opts ...func(*coreapi.HCPOpenShiftCluster))
+		desires      func(t *testing.T) []*kubeapplierapi.ReadDesire
+		applyDesires func(t *testing.T) []*kubeapplierapi.ApplyDesire
+		expected     *coreapi.ServiceProviderClusterAutoNodeStatus
 	}{
 		{
 			name: "cluster not found is a no-op",
@@ -272,6 +296,51 @@ func TestAutoNodeStatusSyncer_SyncOnce(t *testing.T) {
 			},
 			expected: nil,
 		},
+		{
+			name: "rejected ApplyDesire is surfaced even though the HostedCluster mirror is otherwise nil",
+			seed: seedStatusTestCluster,
+			desires: func(t *testing.T) []*kubeapplierapi.ReadDesire {
+				// HostedCluster observed and reconciled, but AutoNode was
+				// never actually delivered to it (no AutoNodeEnabled
+				// condition, no counts) - exactly what you'd see if the SSA
+				// itself was rejected before ever reaching the object.
+				return []*kubeapplierapi.ReadDesire{newAutoNodeReadDesire(t, hyperv1beta1.AutoNodeStatus{})}
+			},
+			applyDesires: func(t *testing.T) []*kubeapplierapi.ApplyDesire {
+				return []*kubeapplierapi.ApplyDesire{newAutoNodeApplyDesire(metav1.Condition{
+					Type:    kubeapplierapi.ConditionTypeSuccessfullyApplied,
+					Status:  metav1.ConditionFalse,
+					Reason:  kubeapplierapi.ConditionReasonKubeAPIError,
+					Message: "HostedCluster.spec.autoNode.provisionerConfig.karpenter.platform: Unsupported value: \"Azure\"",
+				})}
+			},
+			expected: &coreapi.ServiceProviderClusterAutoNodeStatus{
+				DeliveryCondition: &coreapi.ServiceProviderClusterAutoNodeCondition{
+					Status:  string(metav1.ConditionFalse),
+					Reason:  kubeapplierapi.ConditionReasonKubeAPIError,
+					Message: "HostedCluster.spec.autoNode.provisionerConfig.karpenter.platform: Unsupported value: \"Azure\"",
+				},
+			},
+		},
+		{
+			name: "successfully applied ApplyDesire does not populate DeliveryCondition",
+			seed: seedStatusTestCluster,
+			desires: func(t *testing.T) []*kubeapplierapi.ReadDesire {
+				return []*kubeapplierapi.ReadDesire{newAutoNodeReadDesire(t, hyperv1beta1.AutoNodeStatus{
+					NodeCount: ptr.To(int32(1)),
+				})}
+			},
+			applyDesires: func(t *testing.T) []*kubeapplierapi.ApplyDesire {
+				return []*kubeapplierapi.ApplyDesire{newAutoNodeApplyDesire(metav1.Condition{
+					Type:   kubeapplierapi.ConditionTypeSuccessfullyApplied,
+					Status: metav1.ConditionTrue,
+					Reason: kubeapplierapi.ConditionReasonNoErrors,
+				})}
+			},
+			expected: &coreapi.ServiceProviderClusterAutoNodeStatus{
+				NodeCount: ptr.To(int32(1)),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,8 +353,12 @@ func TestAutoNodeStatusSyncer_SyncOnce(t *testing.T) {
 			if tt.desires != nil {
 				desires = tt.desires(t)
 			}
+			var applyDesires []*kubeapplierapi.ApplyDesire
+			if tt.applyDesires != nil {
+				applyDesires = tt.applyDesires(t)
+			}
 
-			require.NoError(t, newStatusTestSyncer(db, desires).SyncOnce(ctx, testKey()))
+			require.NoError(t, newStatusTestSyncer(db, desires, applyDesires...).SyncOnce(ctx, testKey()))
 
 			if _, err := db.HCPClusters(testSub, testRG).Get(ctx, testClusterName); err != nil {
 				// Nothing was seeded; there is no ServiceProviderCluster to assert on.

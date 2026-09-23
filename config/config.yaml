@@ -398,9 +398,6 @@ defaults:
       # repository: redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator
       # digest: sha256:cb8bf5c16f961dc9d673a44867a681bdd2d7844a8d12564ad7ff42d8bc22db3b # 6e6cb83772382fca668279ea55316cf74f128c6c (2026-09-05 06:07)
       registry: arohcpsvcdev.azurecr.io
-      # podman push arohcpsvcdev.azurecr.io/test-asampaio-arohcpbackend:test-asampaio-kube-applier-dirty
-      # repository: macao/hypershift:aro-karpenter-demo
-      # make -C config materialize && git add config/ && git commit --fixup $(git --no-pager log | head -n 10 | grep "KARPENTER 1" | awk '{ print $1 }') && git rebase -i --autosquash 177eeb2901
       repository: asampaio-hypershift:karpenter
       digest: sha256:03d052efb15f946fd897ad2dec91a3936ba26e197ee90be58605830e9aae331d
     namespace: hypershift

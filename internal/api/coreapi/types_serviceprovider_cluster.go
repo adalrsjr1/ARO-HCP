@@ -331,6 +331,15 @@ type ServiceProviderClusterStatus struct {
 // deliberately re-declares the fields rather than embedding hypershift's
 // AutoNodeStatus: this is the Cosmos schema, and it should not change shape
 // just because the upstream API does.
+//
+// Product contract for a failed AutoNode delivery (see AutoNodeEnabler /
+// AutoNodeStatus in backend/pkg/controllers/cluster/autonode): it does NOT
+// fail cluster provisioning - the ARM operation completes regardless,
+// consistent with how other post-create HostedCluster config (e.g.
+// autoscaler settings) is handled - but it MUST be visible here via
+// DeliveryCondition at minimum. Whether a failed delivery should also be
+// surfaced at the ARM level (a cluster property or condition) is an open
+// follow-up product question, deliberately not decided by this type.
 type ServiceProviderClusterAutoNodeStatus struct {
 	// Enabled mirrors the observed HostedCluster's AutoNodeEnabled condition
 	// status (True/False/Unknown, as a bool - Unknown is treated as false).
@@ -350,6 +359,18 @@ type ServiceProviderClusterAutoNodeStatus struct {
 	// Nil when the condition has never been observed yet.
 	// Written by: AutoNodeStatus
 	Condition *ServiceProviderClusterAutoNodeCondition `json:"condition,omitempty"`
+
+	// DeliveryCondition mirrors the AutoNode ApplyDesire's own
+	// SuccessfullyApplied condition, but only when it is present and not
+	// True. This catches a delivery failure that never even reaches the
+	// HostedCluster object - e.g. a management cluster whose HostedCluster
+	// CRD predates the Azure Karpenter field, which the kube-apiserver
+	// rejects outright - which Condition above cannot see, since that field
+	// is only ever populated once the HostedCluster has actually reconciled.
+	// Nil when the most recent delivery attempt succeeded (or none has been
+	// observed yet).
+	// Written by: AutoNodeStatus
+	DeliveryCondition *ServiceProviderClusterAutoNodeCondition `json:"deliveryCondition,omitempty"`
 
 	// NodeCount is the number of nodes fully provisioned by Karpenter, i.e.
 	// node objects that exist in the guest cluster and carry the
