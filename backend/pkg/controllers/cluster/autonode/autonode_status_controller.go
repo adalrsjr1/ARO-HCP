@@ -19,6 +19,10 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
 	hsv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	"github.com/Azure/ARO-HCP/backend/pkg/kubeapplierhelpers"
@@ -140,21 +144,38 @@ func (c *autoNodeStatusSyncer) SyncOnce(ctx context.Context, key controllerutils
 }
 
 // autoNodeStatusFromHostedCluster distills the observed
-// HostedCluster.status.autoNode into its coreapi form.
+// HostedCluster.status.autoNode and its AutoNodeEnabled condition into their
+// coreapi form.
 //
 // hypershift declares status.autoNode as a value (not a pointer) whose fields
 // are all optional, and the hypershift-operator zeroes the whole struct when
-// AutoNode is disabled. An all-nil struct therefore means "not enabled / not
-// reported", and is mapped to nil here so disabling AutoNode clears the mirror
-// rather than pinning it at a stale or zeroed reading.
+// AutoNode is disabled - so the node-count fields alone cannot distinguish
+// "AutoNode enabled but zero nodes currently provisioned" from "AutoNode not
+// enabled": both read as all-nil. The AutoNodeEnabled condition is what
+// resolves that ambiguity - hypershift reports it (e.g. with reason
+// AutoNodeNotConfigured, AutoNodeProgressing, or AutoNodeEvaluationFailed)
+// regardless of whether any nodes exist yet, so its presence is what "not yet
+// observed at all" is mapped to nil against.
 func autoNodeStatusFromHostedCluster(hostedCluster *hsv1beta1.HostedCluster) *coreapi.ServiceProviderClusterAutoNodeStatus {
 	observed := hostedCluster.Status.AutoNode
-	if observed.NodeCount == nil && observed.NodeClaimCount == nil && observed.VCPUs == nil {
+	condition := meta.FindStatusCondition(hostedCluster.Status.Conditions, string(hsv1beta1.AutoNodeEnabled))
+
+	if condition == nil && observed.NodeCount == nil && observed.NodeClaimCount == nil && observed.VCPUs == nil {
 		return nil
 	}
-	return &coreapi.ServiceProviderClusterAutoNodeStatus{
+
+	status := &coreapi.ServiceProviderClusterAutoNodeStatus{
 		NodeCount:      observed.NodeCount,
 		NodeClaimCount: observed.NodeClaimCount,
 		VCPUs:          observed.VCPUs,
 	}
+	if condition != nil {
+		status.Enabled = ptr.To(condition.Status == metav1.ConditionTrue)
+		status.Condition = &coreapi.ServiceProviderClusterAutoNodeCondition{
+			Status:  string(condition.Status),
+			Reason:  condition.Reason,
+			Message: condition.Message,
+		}
+	}
+	return status
 }

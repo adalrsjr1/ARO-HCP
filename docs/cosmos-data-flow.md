@@ -1260,27 +1260,27 @@ No writes to the Cosmos Resources container.
 
 **File:** [controller.go](../backend/pkg/controllers/cluster/autonode/controller.go)
 **Trigger:** Cluster informer + ApplyDesire informer, 5-minute resync
-**Behavior:** Turns the admin-set `Spec.DesiredAutoNodeEnabled` intent into a kube-applier `ApplyDesire` that server-side-applies `spec.autoNode` onto the existing HostedCluster, so the hypershift-operator rolls out the karpenter-operator. Writes no Cosmos resource fields — its only output is the ApplyDesire document. Skips while the cluster is deleting, while the Karpenter Azure client ID is unset (hypershift requires it once platform=Azure), before placement resolves, and until the HostedCluster has actually been observed via its ReadDesire. There is intentionally no coded disable path.
+**Behavior:** Turns AutoNode enablement into a kube-applier `ApplyDesire` that server-side-applies `spec.autoNode` onto the existing HostedCluster, so the hypershift-operator rolls out the karpenter-operator. Writes no Cosmos resource fields — its only output is the ApplyDesire document. The primary trigger is the cluster's sticky, AFEC-gated `ExperimentalFeatures.AutoNode` (create-time-immutable — there is intentionally no coded disable path, since the decision it acts on never changes); the admin-set `Spec.DesiredAutoNodeEnabled` remains a temporary parallel trigger pending retirement. The Karpenter Azure client ID is preferred from the cluster's resolved `autonode` data-plane identity (`Status.DataPlaneOperatorsManagedIdentities`); the admin-set `Spec.DesiredAutoNodeKarpenterAzureClientID` is a break-glass fallback used only while the resolved value isn't available yet. Skips while the cluster is deleting, while no client ID is available from either source, before placement resolves, and until the HostedCluster has actually been observed via its ReadDesire.
 
 | | Object | Fields |
 |---|--------|--------|
-| Read | `HCPOpenShiftCluster` | <ul><li>`ServiceProviderProperties.DeletionTimestamp` (gate: deletion is a no-op)</li><li>`ServiceProviderProperties.ClusterServiceID` (gate: required to build the HostedCluster target)</li><li>`CustomerProperties.DNS.BaseDomainPrefix` (gate: required to build the HostedCluster target)</li></ul> |
-| Read | `ServiceProviderCluster` | <ul><li>`Spec.DesiredAutoNodeEnabled` (gate: must be true)</li><li>`Spec.DesiredAutoNodeKarpenterAzureClientID` (gate: must be non-empty)</li><li>`Status.ManagementClusterResourceID` (gate: placement must be resolved)</li></ul> |
+| Read | `HCPOpenShiftCluster` | <ul><li>`ServiceProviderProperties.DeletionTimestamp` (gate: deletion is a no-op)</li><li>`ServiceProviderProperties.ExperimentalFeatures.AutoNode` (primary trigger)</li><li>`ServiceProviderProperties.ClusterServiceID` (gate: required to build the HostedCluster target)</li><li>`CustomerProperties.DNS.BaseDomainPrefix` (gate: required to build the HostedCluster target)</li><li>`CustomerProperties.Platform.OperatorsAuthentication.UserAssignedIdentities.DataPlaneOperators["autonode"]` (identity resource ID, to look up the resolved client ID)</li></ul> |
+| Read | `ServiceProviderCluster` | <ul><li>`Spec.DesiredAutoNodeEnabled` (temporary parallel trigger)</li><li>`Spec.DesiredAutoNodeKarpenterAzureClientID` (break-glass client ID fallback)</li><li>`Status.DataPlaneOperatorsManagedIdentities.Identities[<lowercased resourceID>].ClientID` (preferred client ID source; `RetrievalError` treated as unresolved)</li><li>`Status.ManagementClusterResourceID` (gate: placement must be resolved)</li></ul> |
 | Read | ReadDesire (HostedCluster) | <ul><li>Existence only — the HostedCluster must be observed before applying a field onto it</li></ul> |
-| **Write** | **ApplyDesire** | <ul><li>Partial HostedCluster carrying **`spec.autoNode`** (server-side apply, field manager `aro-hcp-autonode`)</li></ul> |
+| **Write** | **ApplyDesire** | <ul><li>Partial HostedCluster carrying **`spec.autoNode`** (server-side apply, field manager `aro-hcp-autonode-validation`)</li></ul> |
 
 #### AutoNodeStatus
 
 **File:** [autonode_status_controller.go](../backend/pkg/controllers/cluster/autonode/autonode_status_controller.go)
 **Trigger:** Cluster informer, 5-minute resync
-**Behavior:** Mirrors the observed `HostedCluster.status.autoNode` onto `ServiceProviderCluster.Status.AutoNode`. Karpenter-provisioned nodes are not HyperShift NodePool machines and never appear in the ARM node pool list, so without this mirror nothing in Cosmos records how large a Karpenter-enabled cluster has grown; service-provider-side logic that scales with node count (for example control plane sizing) reads it from here. The counts are computed by the karpenter-operator against the guest cluster and published on `HostedControlPlane.status.autoNode`, which the hypershift-operator copies onto the HostedCluster — this controller only reads the already-mirrored HostedCluster, so no guest-cluster access is involved. An all-nil observed `status.autoNode` (what the hypershift-operator writes when AutoNode is disabled) maps to nil, so disabling clears the mirror. The new value is compared against the stored one before writing, because node counts churn on every scale event.
+**Behavior:** Mirrors the observed `HostedCluster.status.autoNode` and its `AutoNodeEnabled` condition onto `ServiceProviderCluster.Status.AutoNode`. Karpenter-provisioned nodes are not HyperShift NodePool machines and never appear in the ARM node pool list, so without this mirror nothing in Cosmos records how large a Karpenter-enabled cluster has grown; service-provider-side logic that scales with node count (for example control plane sizing) reads it from here. The counts are computed by the karpenter-operator against the guest cluster and published on `HostedControlPlane.status.autoNode`, which the hypershift-operator copies onto the HostedCluster — this controller only reads the already-mirrored HostedCluster, so no guest-cluster access is involved. The node-count fields alone cannot distinguish "AutoNode enabled but zero nodes provisioned" from "AutoNode not enabled" (both read all-nil), so the distilled `AutoNodeEnabled` condition (reported by hypershift regardless of node count, e.g. with reason `AutoNodeProgressing`/`AutoNodeNotConfigured`/`AutoNodeEvaluationFailed`) is what resolves that ambiguity; the whole mirrored value is nil only when neither the condition nor any node-count field has ever been observed. The new value is compared against the stored one before writing, because node counts churn on every scale event.
 
 | | Object | Fields |
 |---|--------|--------|
 | Read | `HCPOpenShiftCluster` | <ul><li>`ServiceProviderProperties.DeletionTimestamp` (gate: deletion is a no-op)</li></ul> |
-| Read | ReadDesire (HostedCluster) | <ul><li>`Status.AutoNode.NodeCount` / `NodeClaimCount` / `VCPUs`</li></ul> |
+| Read | ReadDesire (HostedCluster) | <ul><li>`Status.AutoNode.NodeCount` / `NodeClaimCount` / `VCPUs`</li><li>`Status.Conditions[type=AutoNodeEnabled]`</li></ul> |
 | Read | `ServiceProviderCluster` | <ul><li>`Status.AutoNode` (compared before write to skip no-op replacements)</li></ul> |
-| **Write** | **`ServiceProviderCluster`** | <ul><li>**`Status.AutoNode`** = {NodeCount, NodeClaimCount, VCPUs}, or nil when AutoNode is disabled / not yet reported</li></ul> |
+| **Write** | **`ServiceProviderCluster`** | <ul><li>**`Status.AutoNode`** = {Enabled, Condition, NodeCount, NodeClaimCount, VCPUs}, or nil when neither the AutoNodeEnabled condition nor any node count has ever been observed</li></ul> |
 
 ---
 
@@ -1671,7 +1671,7 @@ Single writer. Read by [OperationClusterCreate](#operationclustercreate) to gate
 
 | Actor | When |
 |-------|------|
-| [AutoNodeStatus](#autonodestatus) | Observe-only: while the cluster is not being deleted and the HostedCluster has been observed via its ReadDesire, mirrors `HostedCluster.status.autoNode` (NodeCount / NodeClaimCount / VCPUs) here, and clears it back to nil when the hypershift-operator zeroes that status on AutoNode disable |
+| [AutoNodeStatus](#autonodestatus) | Observe-only: while the cluster is not being deleted and the HostedCluster has been observed via its ReadDesire, mirrors `HostedCluster.status.autoNode` (NodeCount / NodeClaimCount / VCPUs) and the distilled `AutoNodeEnabled` condition (Enabled / Condition) here, and clears the whole value back to nil once neither has ever been observed |
 
 Single writer. Not exposed on any versioned ARM API: Karpenter node counts are recorded for service-provider-side decisions only.
 

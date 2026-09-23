@@ -327,10 +327,30 @@ type ServiceProviderClusterStatus struct {
 }
 
 // ServiceProviderClusterAutoNodeStatus is the distilled form of the observed
-// HostedCluster.status.autoNode. It deliberately re-declares the fields rather
-// than embedding hypershift's AutoNodeStatus: this is the Cosmos schema, and it
-// should not change shape just because the upstream API does.
+// HostedCluster.status.autoNode and its AutoNodeEnabled condition. It
+// deliberately re-declares the fields rather than embedding hypershift's
+// AutoNodeStatus: this is the Cosmos schema, and it should not change shape
+// just because the upstream API does.
 type ServiceProviderClusterAutoNodeStatus struct {
+	// Enabled mirrors the observed HostedCluster's AutoNodeEnabled condition
+	// status (True/False/Unknown, as a bool - Unknown is treated as false).
+	// This is the field that distinguishes "AutoNode enabled but zero nodes
+	// currently provisioned" from "AutoNode not enabled": the node-count
+	// fields below are indistinguishable between those two states on their
+	// own, since they're all nil/zero in both. Nil means the condition has
+	// never been observed yet (e.g. the HostedCluster hasn't reconciled
+	// since AutoNode was requested).
+	// Written by: AutoNodeStatus
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Condition mirrors the observed HostedCluster's AutoNodeEnabled
+	// condition (reason/message), letting operators and e2e diagnose
+	// delivery state (e.g. "AutoNodeProgressing" vs a stuck
+	// "AutoNodeEvaluationFailed") without needing management-cluster access.
+	// Nil when the condition has never been observed yet.
+	// Written by: AutoNodeStatus
+	Condition *ServiceProviderClusterAutoNodeCondition `json:"condition,omitempty"`
+
 	// NodeCount is the number of nodes fully provisioned by Karpenter, i.e.
 	// node objects that exist in the guest cluster and carry the
 	// karpenter.sh/nodepool label.
@@ -347,6 +367,30 @@ type ServiceProviderClusterAutoNodeStatus struct {
 	// nodes that have registered and reported capacity.
 	// Written by: AutoNodeStatus
 	VCPUs *int32 `json:"vcpus,omitempty"`
+}
+
+// ServiceProviderClusterAutoNodeCondition is the distilled form of the
+// observed HostedCluster's AutoNodeEnabled condition (a
+// k8s.io/apimachinery/pkg/apis/meta/v1.Condition). Re-declared rather than
+// reusing metav1.Condition directly to keep this Cosmos schema decoupled
+// from apimachinery's condition shape (e.g. no LastTransitionTime: Cosmos
+// document mtime already tracks when this was last written).
+type ServiceProviderClusterAutoNodeCondition struct {
+	// Status is the condition's status: "True", "False", or "Unknown", as
+	// reported by hypershift.
+	// Written by: AutoNodeStatus
+	Status string `json:"status,omitempty"`
+
+	// Reason is the machine-readable reason for the condition's status, e.g.
+	// "AutoNodeProgressing", "AutoNodeNotConfigured", or
+	// "AutoNodeEvaluationFailed" (see hsv1beta1's AutoNodeEnabled condition
+	// doc for the full set hypershift may report).
+	// Written by: AutoNodeStatus
+	Reason string `json:"reason,omitempty"`
+
+	// Message is the human-readable detail for the condition's status.
+	// Written by: AutoNodeStatus
+	Message string `json:"message,omitempty"`
 }
 
 // ServiceProviderClusterMSIManagedIdentities holds Managed Service Identity (MSI)

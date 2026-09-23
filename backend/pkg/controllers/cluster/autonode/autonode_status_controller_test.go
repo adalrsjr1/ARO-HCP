@@ -84,6 +84,36 @@ func newAutoNodeReadDesire(t *testing.T, autoNode hyperv1beta1.AutoNodeStatus) *
 	}
 }
 
+// newAutoNodeReadDesireWithCondition builds a ReadDesire carrying a marshaled
+// HostedCluster whose status.autoNode and AutoNodeEnabled condition are the
+// given values, for pinning the "enabled but zero nodes" vs "not enabled"
+// distinction that the condition (not the node counts) resolves.
+func newAutoNodeReadDesireWithCondition(t *testing.T, autoNode hyperv1beta1.AutoNodeStatus, condition metav1.Condition) *kubeapplierapi.ReadDesire {
+	t.Helper()
+
+	hc := &hyperv1beta1.HostedCluster{}
+	hc.APIVersion = "hypershift.openshift.io/v1beta1"
+	hc.Kind = "HostedCluster"
+	hc.SetName(testClusterName)
+	hc.Status.AutoNode = autoNode
+	hc.Status.Conditions = []metav1.Condition{condition}
+	raw, err := json.Marshal(hc)
+	require.NoError(t, err)
+
+	rdResourceIDStr := kubeapplierapi.ToClusterScopedReadDesireResourceIDString(
+		testSub, testRG, testClusterName, kubeapplierhelpers.ReadDesireNameReadonlyHostedCluster,
+	)
+	return &kubeapplierapi.ReadDesire{
+		CosmosMetadata: coreapi.CosmosMetadata{
+			ResourceID:   metadataapi.Must(azcorearm.ParseResourceID(rdResourceIDStr)),
+			PartitionKey: strings.ToLower(testMgmtClusterResourceID().String()),
+		},
+		Status: kubeapplierapi.ReadDesireStatus{
+			KubeContent: &kruntime.RawExtension{Raw: raw},
+		},
+	}
+}
+
 func newStatusTestSyncer(db *corecosmosstoragetesting.MockResourcesDBClient, desires []*kubeapplierapi.ReadDesire) *autoNodeStatusSyncer {
 	return &autoNodeStatusSyncer{
 		resourcesDBClient:            db,
@@ -179,6 +209,50 @@ func TestAutoNodeStatusSyncer_SyncOnce(t *testing.T) {
 				return []*kubeapplierapi.ReadDesire{newAutoNodeReadDesire(t, hyperv1beta1.AutoNodeStatus{})}
 			},
 			expected: nil,
+		},
+		{
+			name: "AutoNodeEnabled condition True but zero nodes: distinguishable from not-enabled",
+			seed: seedStatusTestCluster,
+			desires: func(t *testing.T) []*kubeapplierapi.ReadDesire {
+				return []*kubeapplierapi.ReadDesire{newAutoNodeReadDesireWithCondition(t,
+					hyperv1beta1.AutoNodeStatus{},
+					metav1.Condition{
+						Type:   string(hyperv1beta1.AutoNodeEnabled),
+						Status: metav1.ConditionTrue,
+						Reason: "AsExpected",
+					},
+				)}
+			},
+			expected: &coreapi.ServiceProviderClusterAutoNodeStatus{
+				Enabled: ptr.To(true),
+				Condition: &coreapi.ServiceProviderClusterAutoNodeCondition{
+					Status: string(metav1.ConditionTrue),
+					Reason: "AsExpected",
+				},
+			},
+		},
+		{
+			name: "AutoNodeEnabled condition False/AutoNodeNotConfigured: distinguishable from never-observed",
+			seed: seedStatusTestCluster,
+			desires: func(t *testing.T) []*kubeapplierapi.ReadDesire {
+				return []*kubeapplierapi.ReadDesire{newAutoNodeReadDesireWithCondition(t,
+					hyperv1beta1.AutoNodeStatus{},
+					metav1.Condition{
+						Type:    string(hyperv1beta1.AutoNodeEnabled),
+						Status:  metav1.ConditionFalse,
+						Reason:  hyperv1beta1.AutoNodeNotConfiguredReason,
+						Message: "AutoNode is not configured",
+					},
+				)}
+			},
+			expected: &coreapi.ServiceProviderClusterAutoNodeStatus{
+				Enabled: ptr.To(false),
+				Condition: &coreapi.ServiceProviderClusterAutoNodeCondition{
+					Status:  string(metav1.ConditionFalse),
+					Reason:  hyperv1beta1.AutoNodeNotConfiguredReason,
+					Message: "AutoNode is not configured",
+				},
+			},
 		},
 		{
 			name: "disabling AutoNode clears a previously mirrored value",
