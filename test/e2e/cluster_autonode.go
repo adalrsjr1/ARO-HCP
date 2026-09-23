@@ -22,6 +22,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 
 	"github.com/Azure/ARO-HCP/internal/api/coreapi"
@@ -31,18 +35,37 @@ import (
 	"github.com/Azure/ARO-HCP/test/util/verifiers"
 )
 
-// This test exercises the enablement signal (AFEC-gated tag ->
+// autoNodeTestOpenshiftVersion and autoNodeTestMarketplaceImage must be kept
+// in lockstep: the marketplace image is an RHCOS build tied to a specific
+// OpenShift minor version, and there is no API-level way to derive one from
+// the other. If autoNodeTestOpenshiftVersion changes, this image reference
+// must be re-verified (e.g. `az vm image list --all --publisher
+// azureopenshift --offer aro4 --sku aro_422-v2 -o table`) and updated too.
+const autoNodeTestOpenshiftVersion = "4.22"
+
+var autoNodeTestMarketplaceImage = framework.KarpenterMarketplaceImage{
+	Publisher: "azureopenshift",
+	Offer:     "aro4",
+	SKU:       "aro_422-v2",
+	Version:   "9.8.20260428",
+}
+
+// This test exercises: the enablement signal (AFEC-gated tag ->
 // ExperimentalFeatures.AutoNode projection, admit_cluster.go) plus the
 // "autonode" data-plane operator identity per ClusterOperatorIdentifierAutoNode
-// in internal/azure/cluster_scoped_identities_config.go, and confirms the
-// cluster still comes up healthy with both set. AutoNode's remaining
-// downstream pieces (CS delivery/consumption of that identity and the
-// Karpenter delivery bridge) are not wired up yet, so there is no real
-// Karpenter behavior to assert on here. Extend this test once that plumbing
-// lands.
+// in internal/azure/cluster_scoped_identities_config.go; automatic delivery of
+// spec.autoNode onto the cluster's HostedCluster by the backend's
+// AutoNodeEnabler controller; and that Karpenter actually provisions a real
+// Azure node once scheduling pressure exists, and deprovisions it again once
+// that pressure is gone.
+//
+// Known gap this test works around rather than fixes: there is no CSR
+// auto-approver for Karpenter-provisioned nodes on Azure (see
+// framework.RunKarpenterNodeCSRApprover's doc comment) - a passing run here is
+// not evidence that gap is closed.
 var _ = Describe("Customer", func() {
-	It("should be able to enable AutoNode via the experimental tag for a cluster with version >= 4.22",
-		labels.RequireNothing, labels.Medium, labels.Positive, labels.AroRpApiCompatible, labels.CreateCluster,
+	It("should be able to enable AutoNode via the experimental tag for a cluster with version >= 4.22 and provision a real node via Karpenter",
+		labels.RequireNothing, labels.Medium, labels.Slow, labels.Positive, labels.AroRpApiCompatible, labels.CreateCluster,
 		labels.MIContainers(0),
 		func(ctx context.Context) {
 			const clusterName = "autonode-enable-422"
@@ -71,7 +94,7 @@ var _ = Describe("Customer", func() {
 			By("creating cluster parameters with version 4.22 and the AutoNode experimental tag")
 			clusterParams := framework.NewDefaultClusterParams20260630()
 			clusterParams.ClusterName = clusterName
-			clusterParams.OpenshiftVersionId = "4.22"
+			clusterParams.OpenshiftVersionId = autoNodeTestOpenshiftVersion
 			// NOTE: The E2E subscription must have the ExperimentalReleaseFeatures AFEC
 			// registered for this tag to be honored (see NewDefaultClusterParams20260630,
 			// whose default tags rely on the same AFEC). Without it, admission silently
@@ -154,5 +177,96 @@ var _ = Describe("Customer", func() {
 			By("verifying the cluster is healthy with AutoNode enabled")
 			err = verifiers.VerifyHCPCluster(ctx, adminRESTConfig)
 			Expect(err).NotTo(HaveOccurred(), "failed to verify HCP cluster %s is healthy", clusterName)
+
+			By("verifying the guest Karpenter CRDs are installed")
+			// Hard precondition, not a workaround target: the standalone
+			// karpenter-operator installs these unconditionally on startup, so
+			// their absence means the container itself is broken, not a normal
+			// timing state to build a fallback around.
+			err = verifiers.VerifyKarpenterCRDsInstalled(5*time.Minute).Verify(ctx, adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "guest Karpenter CRDs are not installed on cluster %s", clusterName)
+
+			const karpenterResourceName = "default"
+			karpenterInstanceTypes := []string{"Standard_D4s_v3", "Standard_D4s_v5"}
+
+			By("applying an AKSNodeClass and NodePool for Karpenter")
+			err = framework.ApplyAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName, autoNodeTestMarketplaceImage, karpenterInstanceTypes)
+			Expect(err).NotTo(HaveOccurred(), "failed to apply AKSNodeClass and NodePool %q", karpenterResourceName)
+			DeferCleanup(func(ctx context.Context) {
+				_ = framework.DeleteAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName)
+			})
+
+			By("waiting for the AKSNodeClass to become ready")
+			err = verifiers.VerifyAKSNodeClassReady(karpenterResourceName, 5*time.Minute).Verify(ctx, adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "AKSNodeClass %q did not become ready", karpenterResourceName)
+
+			nodeSelector := map[string]string{
+				"autonode":                       "true",
+				framework.KarpenterNodePoolLabel: karpenterResourceName,
+			}
+			const workloadNamespace = "autonode-e2e-workload"
+			const workloadName = "autonode-e2e-pending"
+
+			By("deploying a workload matched to the Karpenter NodePool, initially at 0 replicas")
+			err = framework.DeployPendingWorkload(ctx, adminRESTConfig, workloadNamespace, workloadName, nodeSelector)
+			Expect(err).NotTo(HaveOccurred(), "failed to deploy pending workload %q", workloadName)
+			DeferCleanup(func(ctx context.Context) {
+				_ = framework.DeleteNamespace(ctx, adminRESTConfig, workloadNamespace)
+			})
+
+			kubeClient, err := kubernetes.NewForConfig(adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "failed to create kubernetes client for cluster %s", clusterName)
+
+			By("scaling the workload to 1 replica to create real scheduling pressure")
+			err = framework.ScaleDeployment(ctx, adminRESTConfig, workloadNamespace, workloadName, 1)
+			Expect(err).NotTo(HaveOccurred(), "failed to scale workload %q to 1 replica", workloadName)
+
+			By("verifying the workload's pod is Pending, proving the scheduling pressure is real")
+			Eventually(func(g Gomega) {
+				pods, err := kubeClient.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + workloadName})
+				g.Expect(err).NotTo(HaveOccurred(), "failed to list pods for workload %q", workloadName)
+				g.Expect(pods.Items).To(HaveLen(1), "expected exactly one pod for workload %q", workloadName)
+				g.Expect(pods.Items[0].Status.Phase).To(Equal(corev1.PodPending), "expected workload pod to be Pending: no node satisfying the NodePool's requirements should exist yet")
+			}, time.Minute, 5*time.Second).Should(Succeed(), "workload pod never reached Pending phase")
+
+			By("waiting for Karpenter to provision a real Azure node, approving its CSRs as a workaround for the missing Azure auto-approver")
+			csrApproverCtx, stopCSRApprover := context.WithCancel(ctx)
+			var approvedCSRCount int
+			var csrApproverErr error
+			csrApproverDone := make(chan struct{})
+			go func() {
+				defer close(csrApproverDone)
+				approvedCSRCount, csrApproverErr = framework.RunKarpenterNodeCSRApprover(csrApproverCtx, adminRESTConfig, 10*time.Second)
+			}()
+
+			// Demo notes ~5 minutes for a Karpenter-provisioned Azure VM to
+			// initialize and start trying to register, on top of normal
+			// cluster-create time already spent above; budget generously.
+			err = verifiers.VerifyKarpenterNodeProvisioned(karpenterResourceName, 25*time.Minute).Verify(ctx, adminRESTConfig)
+			stopCSRApprover()
+			<-csrApproverDone
+			GinkgoLogr.Info("Karpenter node CSR approver finished", "approved", approvedCSRCount)
+			Expect(csrApproverErr).NotTo(HaveOccurred(), "background Karpenter node CSR approver failed")
+			Expect(err).NotTo(HaveOccurred(), "Karpenter never provisioned a Ready, schedulable, fully-linked node for NodePool %q", karpenterResourceName)
+
+			By("verifying the workload's pod reaches Running on the Karpenter-provisioned node")
+			Eventually(func(g Gomega) {
+				pods, err := kubeClient.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + workloadName})
+				g.Expect(err).NotTo(HaveOccurred(), "failed to list pods for workload %q", workloadName)
+				g.Expect(pods.Items).To(HaveLen(1), "expected exactly one pod for workload %q", workloadName)
+				g.Expect(pods.Items[0].Status.Phase).To(Equal(corev1.PodRunning), "expected workload pod to reach Running once Karpenter provisioned a node")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed(), "workload pod never reached Running phase on the Karpenter-provisioned node")
+
+			By("scaling the workload back down and deleting the NodePool/AKSNodeClass, verifying Karpenter actually deprovisions the node")
+			err = framework.ScaleDeployment(ctx, adminRESTConfig, workloadNamespace, workloadName, 0)
+			Expect(err).NotTo(HaveOccurred(), "failed to scale workload %q back to 0 replicas", workloadName)
+			err = framework.DeleteAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName)
+			Expect(err).NotTo(HaveOccurred(), "failed to delete AKSNodeClass/NodePool %q", karpenterResourceName)
+			err = verifiers.VerifyKarpenterDeprovisioned(karpenterResourceName, 10*time.Minute).Verify(ctx, adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "Karpenter did not deprovision the Node/NodeClaim for NodePool %q; a VM may have leaked", karpenterResourceName)
+
+			By("deleting the workload namespace")
+			err = framework.DeleteNamespace(ctx, adminRESTConfig, workloadNamespace)
+			Expect(err).NotTo(HaveOccurred(), "failed to delete workload namespace %q", workloadNamespace)
 		})
 })
