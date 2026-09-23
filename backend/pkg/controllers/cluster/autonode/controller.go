@@ -30,10 +30,13 @@ package autonode
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Azure/ARO-HCP/backend/pkg/kubeapplierhelpers"
 	"github.com/Azure/ARO-HCP/backend/pkg/utils/controllerutils"
+	"github.com/Azure/ARO-HCP/internal/api/coreapi"
+	"github.com/Azure/ARO-HCP/internal/azure"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/corecosmosstorage"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/cosmosstorageutils"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/kubeappliercosmosstorage"
@@ -141,15 +144,25 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 		return nil
 	}
 
-	clientID := serviceProviderCluster.Spec.DesiredAutoNodeKarpenterAzureClientID
-	if clientID == nil || *clientID == "" {
+	// Prefer the ClientID resolved from the cluster's own "autonode" data-plane
+	// identity: it's the authoritative source once resolved, and unlike the
+	// admin-set field it can never go stale relative to the identity actually
+	// federated for the cluster. The admin-set field is a break-glass fallback
+	// for use only while the resolved value isn't available yet - it must
+	// never permanently shadow the resolved value once that appears.
+	var clientID string
+	if resolved, ok := autoNodeKarpenterClientID(existingCluster, serviceProviderCluster); ok {
+		clientID = resolved
+	} else if fallback := serviceProviderCluster.Spec.DesiredAutoNodeKarpenterAzureClientID; fallback != nil && *fallback != "" {
+		clientID = *fallback
+	} else {
 		// AutoNode is requested but the Azure managed-identity client ID
-		// hasn't been supplied yet. hypershift's KarpenterAzureConfig.ClientID
+		// hasn't been resolved yet. hypershift's KarpenterAzureConfig.ClientID
 		// is a required field once platform=Azure, so applying without it
 		// would either be rejected by the kube-apiserver's CRD validation or
-		// leave the karpenter-operator hard-erroring. Wait for the admin
-		// request to include it rather than applying a doomed-to-fail desire.
-		logger.Info("AutoNode enabled but no Karpenter Azure client ID set yet; waiting")
+		// leave the karpenter-operator hard-erroring. Wait rather than
+		// applying a doomed-to-fail desire.
+		logger.Info("AutoNode enabled but no Karpenter Azure client ID resolved yet; waiting")
 		return nil
 	}
 
@@ -198,7 +211,7 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 	}
 
 	target := controllerutils.HostedClusterTarget(s.hostedClusterNamespaceEnvIdentifier, csClusterID, csClusterDomainPrefix)
-	desire, err := buildAutoNodeApplyDesire(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, mcResourceID, target, *clientID)
+	desire, err := buildAutoNodeApplyDesire(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, mcResourceID, target, clientID)
 	if err != nil {
 		return err
 	}
@@ -208,4 +221,24 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 	}
 
 	return nil
+}
+
+// autoNodeKarpenterClientID returns the resolved Azure client ID for the
+// cluster's "autonode" data-plane operator identity, looked up on the
+// ServiceProviderCluster status by the lowercased identity resource ID. The
+// bool is false when the identity isn't configured on the cluster yet, or
+// its client ID hasn't been resolved yet, or the most recent resolution
+// attempt failed (RetrievalError set). Mirrors
+// roleassignments.dataPlaneOperatorPrincipalID's lookup pattern.
+func autoNodeKarpenterClientID(cluster *coreapi.HCPOpenShiftCluster, serviceProviderCluster *coreapi.ServiceProviderCluster) (string, bool) {
+	identityResourceID, ok := cluster.CustomerProperties.Platform.OperatorsAuthentication.UserAssignedIdentities.DataPlaneOperators[string(azure.ClusterOperatorIdentifierAutoNode)]
+	if !ok || identityResourceID == nil {
+		return "", false
+	}
+	key := strings.ToLower(identityResourceID.String())
+	identity, ok := serviceProviderCluster.Status.DataPlaneOperatorsManagedIdentities.Identities[key]
+	if !ok || identity == nil || identity.RetrievalError != nil || identity.ClientID == nil || len(*identity.ClientID) == 0 {
+		return "", false
+	}
+	return *identity.ClientID, true
 }

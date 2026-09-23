@@ -4,6 +4,7 @@ SRE should be able to retrieve serial console logs for a VM
 Customer should be able to test admin credentials before cluster ready, then full admin credential lifecycle
 Customer should be able to create node pools with ARM64-based VMs
 Authorized CIDRs Connectivity should allow API access only from authorized VM IP
+Customer should be able to enable AutoNode via the experimental tag for a cluster with version >= 4.22
 Customer should be able to create an HCP cluster with custom autoscaling and update the autoscaling configuration
 Customer should be able to create a HCP cluster and use cilium CNI plugin
 Customer should be able to create a no-CNI private cluster with a private key vault, a nodepool and install cilium CNI successfully
@@ -93,4 +94,3 @@ Customer should upgrade a nodepool skipping one minor version (+2) from 4.20.z t
 Customer should downgrade a nodepool version z-stream downgrade from 4.21.zLatest to 4.21.zPrevious
 Customer should downgrade a nodepool to a lower minor version from 4.22.zLatest to 4.20.zLatest
 Customer should be able to use workload identity via the cluster OIDC issuer URL
-Customer should be able to enable AutoNode via the experimental tag for a cluster with version >= 4.22

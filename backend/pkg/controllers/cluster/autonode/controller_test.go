@@ -38,6 +38,7 @@ import (
 	"github.com/Azure/ARO-HCP/internal/api/fleetapi"
 	"github.com/Azure/ARO-HCP/internal/api/kubeapplierapi"
 	"github.com/Azure/ARO-HCP/internal/api/metadataapi"
+	"github.com/Azure/ARO-HCP/internal/azure"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstoragetesting/kubeappliercosmosstoragetesting"
 	"github.com/Azure/ARO-HCP/internal/database/listertesting/corelistertesting"
 	"github.com/Azure/ARO-HCP/internal/database/listertesting/fleetlistertesting"
@@ -90,6 +91,13 @@ func newTestCluster(opts ...func(*coreapi.HCPOpenShiftCluster)) *coreapi.HCPOpen
 		opt(cluster)
 	}
 	return cluster
+}
+
+func testAutoNodeIdentityResourceID() *azcorearm.ResourceID {
+	return metadataapi.Must(azcorearm.ParseResourceID(
+		"/subscriptions/" + testSub + "/resourceGroups/" + testRG +
+			"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/autonode-identity",
+	))
 }
 
 func newTestServiceProviderCluster(opts ...func(*coreapi.ServiceProviderCluster)) *coreapi.ServiceProviderCluster {
@@ -311,4 +319,149 @@ func TestAutoNodeSyncer_SyncOnce_CreatesApplyDesire(t *testing.T) {
 	again, err := applyDesireCRUD.Get(ctx, autoNodeApplyDesireName)
 	require.NoError(t, err)
 	assert.Equal(t, applyDesire.Spec, again.Spec)
+}
+
+const testResolvedClientID = "33333333-3333-3333-3333-333333333333"
+
+func withAutoNodeIdentity(c *coreapi.HCPOpenShiftCluster) {
+	c.CustomerProperties.Platform.OperatorsAuthentication.UserAssignedIdentities.DataPlaneOperators = map[string]*azcorearm.ResourceID{
+		string(azure.ClusterOperatorIdentifierAutoNode): testAutoNodeIdentityResourceID(),
+	}
+}
+
+func withResolvedAutoNodeClientID(clientID string) func(*coreapi.ServiceProviderCluster) {
+	return func(spc *coreapi.ServiceProviderCluster) {
+		spc.Status.DataPlaneOperatorsManagedIdentities.Identities = map[string]*coreapi.ServiceProviderClusterDataPlaneOperatorManagedIdentity{
+			strings.ToLower(testAutoNodeIdentityResourceID().String()): {
+				ResourceID: testAutoNodeIdentityResourceID(),
+				ClientID:   ptr.To(clientID),
+			},
+		}
+	}
+}
+
+func TestAutoNodeKarpenterClientID(t *testing.T) {
+	tests := []struct {
+		name         string
+		clusterOpt   func(*coreapi.HCPOpenShiftCluster)
+		spcOpt       func(*coreapi.ServiceProviderCluster)
+		wantResolved string
+		wantOK       bool
+	}{
+		{
+			name:         "resolved",
+			clusterOpt:   withAutoNodeIdentity,
+			spcOpt:       withResolvedAutoNodeClientID(testResolvedClientID),
+			wantResolved: testResolvedClientID,
+			wantOK:       true,
+		},
+		{
+			name:       "identity not configured on cluster",
+			clusterOpt: func(*coreapi.HCPOpenShiftCluster) {},
+			spcOpt:     withResolvedAutoNodeClientID(testResolvedClientID),
+			wantOK:     false,
+		},
+		{
+			name:       "identity configured but not yet resolved",
+			clusterOpt: withAutoNodeIdentity,
+			spcOpt:     func(*coreapi.ServiceProviderCluster) {},
+			wantOK:     false,
+		},
+		{
+			name:       "resolution failed (RetrievalError set)",
+			clusterOpt: withAutoNodeIdentity,
+			spcOpt: func(spc *coreapi.ServiceProviderCluster) {
+				spc.Status.DataPlaneOperatorsManagedIdentities.Identities = map[string]*coreapi.ServiceProviderClusterDataPlaneOperatorManagedIdentity{
+					strings.ToLower(testAutoNodeIdentityResourceID().String()): {
+						ResourceID:     testAutoNodeIdentityResourceID(),
+						RetrievalError: ptr.To("failed to get identity"),
+					},
+				}
+			},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster(tt.clusterOpt)
+			spc := newTestServiceProviderCluster(tt.spcOpt)
+			got, ok := autoNodeKarpenterClientID(cluster, spc)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.wantResolved, got)
+			}
+		})
+	}
+}
+
+// TestAutoNodeSyncer_SyncOnce_PrefersResolvedClientID pins the preference
+// order: the resolved identity ClientID must win over the admin-set
+// break-glass field whenever both are present, and must be used by itself
+// once resolved even if the break-glass field was previously the only
+// source (i.e. resolution "taking over" from the fallback isn't a special
+// case - it's just the same preference order evaluated again).
+func TestAutoNodeSyncer_SyncOnce_PrefersResolvedClientID(t *testing.T) {
+	ctx := utils.ContextWithLogger(context.Background(), testr.New(t))
+
+	mockKubeApplier := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClient()
+	mockClients := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClients()
+	mockClients.Register(testMgmtClusterResourceID(), mockKubeApplier)
+	seedHostedClusterReadDesire(t, ctx, mockKubeApplier)
+
+	// Both the resolved identity and the admin break-glass field are set,
+	// to different values: the resolved value must win.
+	syncer := newTestSyncer(
+		[]*coreapi.HCPOpenShiftCluster{newTestCluster(withAutoNodeIdentity)},
+		[]*coreapi.ServiceProviderCluster{newTestServiceProviderCluster(
+			withResolvedAutoNodeClientID(testResolvedClientID),
+			func(spc *coreapi.ServiceProviderCluster) {
+				spc.Spec.DesiredAutoNodeKarpenterAzureClientID = ptr.To(testClientID)
+			},
+		)},
+		mockClients,
+	)
+
+	require.NoError(t, syncer.SyncOnce(ctx, testKey()))
+
+	applyDesireCRUD, err := mockKubeApplier.ApplyDesiresForCluster(testSub, testRG, testClusterName)
+	require.NoError(t, err)
+	applyDesire, err := applyDesireCRUD.Get(ctx, autoNodeApplyDesireName)
+	require.NoError(t, err)
+
+	var payload partialHostedCluster
+	require.NoError(t, json.Unmarshal(applyDesire.Spec.ServerSideApply.KubeContent.Raw, &payload))
+	assert.Equal(t, testResolvedClientID, payload.Spec.AutoNode.Provisioner.Karpenter.Azure.ClientID,
+		"resolved identity ClientID must take priority over the admin break-glass field")
+}
+
+// TestAutoNodeSyncer_SyncOnce_FallsBackToAdminClientID pins that the
+// admin-set break-glass field is still honored when the identity hasn't
+// resolved yet, preserving today's admin-triggered workflow.
+func TestAutoNodeSyncer_SyncOnce_FallsBackToAdminClientID(t *testing.T) {
+	ctx := utils.ContextWithLogger(context.Background(), testr.New(t))
+
+	mockKubeApplier := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClient()
+	mockClients := kubeappliercosmosstoragetesting.NewMockKubeApplierDBClients()
+	mockClients.Register(testMgmtClusterResourceID(), mockKubeApplier)
+	seedHostedClusterReadDesire(t, ctx, mockKubeApplier)
+
+	// No autonode identity configured on the cluster at all (as in today's
+	// admin-only POC flow) - only the break-glass field is set.
+	syncer := newTestSyncer(
+		[]*coreapi.HCPOpenShiftCluster{newTestCluster()},
+		[]*coreapi.ServiceProviderCluster{newTestServiceProviderCluster()},
+		mockClients,
+	)
+
+	require.NoError(t, syncer.SyncOnce(ctx, testKey()))
+
+	applyDesireCRUD, err := mockKubeApplier.ApplyDesiresForCluster(testSub, testRG, testClusterName)
+	require.NoError(t, err)
+	applyDesire, err := applyDesireCRUD.Get(ctx, autoNodeApplyDesireName)
+	require.NoError(t, err)
+
+	var payload partialHostedCluster
+	require.NoError(t, json.Unmarshal(applyDesire.Spec.ServerSideApply.KubeContent.Raw, &payload))
+	assert.Equal(t, testClientID, payload.Spec.AutoNode.Provisioner.Karpenter.Azure.ClientID)
 }
