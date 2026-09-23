@@ -114,6 +114,7 @@ var _ = Describe("Customer", func() {
 				map[string]interface{}{},
 				TestArtifactsFS,
 				framework.RBACScopeResourceGroup,
+				true, // enableAutoNode
 			)
 			Expect(err).NotTo(HaveOccurred(), "failed to create customer resources for AutoNode enablement cluster")
 

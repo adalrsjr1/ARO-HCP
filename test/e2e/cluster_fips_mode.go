@@ -81,6 +81,7 @@ var _ = Describe("FIPS Mode Support", func() {
 					map[string]interface{}{},
 					TestArtifactsFS,
 					framework.RBACScopeResourceGroup,
+					false, // enableAutoNode
 				)
 				Expect(err).NotTo(HaveOccurred(), "failed to create cluster customer resources")
 

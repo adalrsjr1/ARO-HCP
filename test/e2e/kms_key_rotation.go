@@ -84,6 +84,7 @@ var _ = Describe("Customer", func() {
 				},
 				TestArtifactsFS,
 				framework.RBACScopeResourceGroup,
+				false, // enableAutoNode
 			)
 			Expect(err).NotTo(HaveOccurred(), "failed to create customer resources for KMS key rotation cluster")
 

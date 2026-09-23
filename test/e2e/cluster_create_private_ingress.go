@@ -83,6 +83,7 @@ var _ = Describe("Customer", func() {
 				map[string]interface{}{},
 				TestArtifactsFS,
 				framework.RBACScopeResourceGroup,
+				false, // enableAutoNode
 			)
 			Expect(err).NotTo(HaveOccurred(), "failed to create customer resources for private ingress cluster")
 

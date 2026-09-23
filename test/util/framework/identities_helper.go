@@ -231,6 +231,13 @@ func (tc *perItOrDescribeTestContext) DeployManagedIdentities(
 		identities = NewDefaultIdentitiesWithSuffix(clusterName)
 	}
 
+	// Defaults to false (identity type assertion zero-value) when the caller
+	// doesn't pass it: only tests that actually enable AutoNode should set
+	// this, since Cluster Service rejects a create request whose
+	// dataPlaneOperators includes an identity without corresponding feature
+	// enablement for the target OpenShift version.
+	enableAutoNode, _ := cfg.parameters["enableAutoNode"].(bool)
+
 	parameters := map[string]interface{}{
 		"nsgName":                  cfg.parameters["nsgName"],
 		"vnetName":                 cfg.parameters["vnetName"],
@@ -242,6 +249,7 @@ func (tc *perItOrDescribeTestContext) DeployManagedIdentities(
 		"identities":               identities,
 		"rbacScope":                rbacScope,
 		"clusterName":              clusterName,
+		"enableAutoNode":           enableAutoNode,
 	}
 
 	deploymentResult, err := tc.CreateBicepTemplateAndWait(ctx,

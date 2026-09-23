@@ -41,6 +41,9 @@ param keyVaultName string
 ])
 param rbacScope string = 'resourceGroup'
 
+@description('If true, grant the dp-autonode managed identity the role assignments it needs and include it in dataPlaneOperators. Only tests that actually enable AutoNode should set this: Cluster Service rejects a create request whose dataPlaneOperators includes an identity without corresponding feature enablement for the target OpenShift version.')
+param enableAutoNode bool = false
+
 //
 // E X I S T I N G   R E S O U R C E S
 //
@@ -448,7 +451,7 @@ var networkContributorRoleId = subscriptionResourceId(
   '4d97b98b-1d4f-4787-a291-c67834d212e7'
 )
 
-resource dpAutoNodeNetworkContributorRoleResourceGroupAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (rbacScope == 'resourceGroup') {
+resource dpAutoNodeNetworkContributorRoleResourceGroupAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableAutoNode && rbacScope == 'resourceGroup') {
   name: guid(resourceGroup().id, dpAutoNodeMi.id, networkContributorRoleId)
   scope: resourceGroup()
   properties: {
@@ -458,7 +461,7 @@ resource dpAutoNodeNetworkContributorRoleResourceGroupAssignment 'Microsoft.Auth
   }
 }
 
-resource dpAutoNodeNetworkContributorRoleVnetAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (rbacScope == 'resource') {
+resource dpAutoNodeNetworkContributorRoleVnetAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableAutoNode && rbacScope == 'resource') {
   name: guid(resourceGroup().id, dpAutoNodeMi.id, networkContributorRoleId, vnet.id)
   scope: vnet
   properties: {
@@ -470,7 +473,7 @@ resource dpAutoNodeNetworkContributorRoleVnetAssignment 'Microsoft.Authorization
 
 // No subnet-scoped assignment: the VNet-scoped grant above already covers the subnet via RBAC scope inheritance.
 
-resource dpAutoNodeNetworkContributorRoleNsgAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (rbacScope == 'resource') {
+resource dpAutoNodeNetworkContributorRoleNsgAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableAutoNode && rbacScope == 'resource') {
   name: guid(resourceGroup().id, dpAutoNodeMi.id, networkContributorRoleId, nsg.id)
   scope: nsg
   properties: {
@@ -573,12 +576,14 @@ output userAssignedIdentitiesValue object = {
     'cloud-network-config': cloudNetworkConfigMi.id
     'kms': kmsMi.id
   }
-  dataPlaneOperators: {
-    'disk-csi-driver': dpDiskCsiDriverMi.id
-    'file-csi-driver': dpFileCsiDriverMi.id
-    'image-registry': dpImageRegistryMi.id
-    'autonode': dpAutoNodeMi.id
-  }
+  dataPlaneOperators: union(
+    {
+      'disk-csi-driver': dpDiskCsiDriverMi.id
+      'file-csi-driver': dpFileCsiDriverMi.id
+      'image-registry': dpImageRegistryMi.id
+    },
+    enableAutoNode ? { autonode: dpAutoNodeMi.id } : {}
+  )
   serviceManagedIdentity: serviceManagedIdentity.id
 }
 
