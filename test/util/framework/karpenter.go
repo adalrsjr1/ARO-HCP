@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+
 	appsv1 "k8s.io/api/apps/v1"
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +33,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 )
 
 // Karpenter/AKSNodeClass resource identity. These GVRs deliberately are not
@@ -71,8 +74,11 @@ type KarpenterMarketplaceImage struct {
 // ApplyAKSNodeClassAndNodePool creates the (cluster-scoped) AKSNodeClass and
 // NodePool this test needs to prove Karpenter provisions a real node. Both
 // resources are named `name`; the NodePool's pod template carries the label
-// {KarpenterNodePoolLabel: name} in addition to `autonode: "true"`, matching
-// the demo-validated shape. instanceTypes must be non-empty.
+// `autonode: "true"`. It must not also set KarpenterNodePoolLabel: Karpenter
+// stamps that label onto every Node/NodeClaim it provisions itself, and
+// rejects NodePools that try to set it in spec.template.metadata.labels as
+// "restricted". Nodes provisioned by this NodePool still end up with
+// KarpenterNodePoolLabel=name automatically. instanceTypes must be non-empty.
 func ApplyAKSNodeClassAndNodePool(ctx context.Context, adminRESTConfig *rest.Config, name string, image KarpenterMarketplaceImage, instanceTypes []string) error {
 	if len(instanceTypes) == 0 {
 		return fmt.Errorf("instanceTypes must not be empty")
@@ -122,8 +128,7 @@ func ApplyAKSNodeClassAndNodePool(ctx context.Context, adminRESTConfig *rest.Con
 				"template": map[string]any{
 					"metadata": map[string]any{
 						"labels": map[string]any{
-							"autonode":             "true",
-							KarpenterNodePoolLabel: name,
+							"autonode": "true",
 						},
 					},
 					"spec": map[string]any{
@@ -224,18 +229,25 @@ func DeployPendingWorkload(ctx context.Context, adminRESTConfig *rest.Config, na
 }
 
 // ScaleDeployment patches a Deployment's replica count via the scale
-// subresource.
+// subresource, retrying on a resourceVersion conflict: the Deployment
+// controller itself can reconcile (bumping resourceVersion, e.g. right after
+// a freshly-created Deployment) in the window between GetScale and
+// UpdateScale, which a single-shot get-then-update would otherwise fail on.
 func ScaleDeployment(ctx context.Context, adminRESTConfig *rest.Config, namespace, name string, replicas int32) error {
 	kubeClient, err := kubernetes.NewForConfig(adminRESTConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
-	scale, err := kubeClient.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		scale, err := kubeClient.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get scale for deployment %q: %w", name, err)
+		}
+		scale.Spec.Replicas = replicas
+		_, err = kubeClient.AppsV1().Deployments(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("failed to get scale for deployment %q: %w", name, err)
-	}
-	scale.Spec.Replicas = replicas
-	if _, err := kubeClient.AppsV1().Deployments(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to scale deployment %q to %d replicas: %w", name, replicas, err)
 	}
 	return nil
@@ -300,6 +312,14 @@ func RunKarpenterNodeCSRApprover(ctx context.Context, adminRESTConfig *rest.Conf
 				return false, fmt.Errorf("failed to approve CertificateSigningRequest %q: %w", csr.Name, err)
 			}
 			approved++
+			// Logged per-approval (not just the final count) so a run's timeline
+			// can be correlated against node/NodeClaim creation timestamps when
+			// debugging why Karpenter provisioned more nodes than expected -
+			// requestor/signerName distinguish the client-cert vs serving-cert
+			// CSR a node typically submits.
+			ginkgo.GinkgoLogr.Info("approved Karpenter node CSR",
+				"name", csr.Name, "requestor", csr.Spec.Username, "signerName", csr.Spec.SignerName,
+				"creationTimestamp", csr.CreationTimestamp.Time, "totalApproved", approved)
 		}
 		return false, nil // never "done" on its own; only ctx ending stops this loop
 	})

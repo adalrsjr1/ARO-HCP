@@ -17,16 +17,22 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/blang/semver/v4"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+
+	configv1 "github.com/openshift/api/config/v1"
+	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 
 	"github.com/Azure/ARO-HCP/internal/api/coreapi"
 	"github.com/Azure/ARO-HCP/internal/api/metadataapi"
@@ -179,6 +185,60 @@ var _ = Describe("Customer", func() {
 			err = verifiers.VerifyHCPCluster(ctx, adminRESTConfig)
 			Expect(err).NotTo(HaveOccurred(), "failed to verify HCP cluster %s is healthy", clusterName)
 
+			By("creating a regular worker node pool so cluster-infra pods have somewhere to run besides the Karpenter node")
+			// Without a regular node pool, every non-DaemonSet infra pod (router,
+			// monitoring, image-registry, etc.) has nowhere to schedule except the
+			// single Karpenter-provisioned node, since that would otherwise be the
+			// only Ready node in the cluster. That starved Karpenter's own node
+			// drain during teardown: deleting the NodePool tries to evict those
+			// pods, but they have nowhere else to go, so the drain hangs (observed
+			// as "Failed to drain node, N pods are waiting to be evicted" events
+			// and VerifyKarpenterDeprovisioned timing out). Mirrors the regular
+			// worker node pool created by other multi-node e2e tests (e.g.
+			// complete_cluster_create_multiversion.go); the workload pod that
+			// actually exercises Karpenter is pinned away from this node pool via
+			// nodeSelector below.
+			const workerNodePoolName = "workers"
+			nodePoolParams := framework.NewDefaultNodePoolParams20260630()
+			nodePoolParams.ClusterName = clusterName
+			nodePoolParams.NodePoolName = workerNodePoolName
+
+			// The node pool API requires a concrete Major.Minor.Patch version (unlike
+			// the control plane, which resolves a bare "4.22"), so resolve one from
+			// the cluster's own ClusterVersion history rather than guessing.
+			configClient, err := configv1client.NewForConfig(adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "failed to create OpenShift config client for cluster %s", clusterName)
+			clusterVersion, err := configClient.ClusterVersions().Get(ctx, "version", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred(), "failed to get ClusterVersion for cluster %s", clusterName)
+			var parseableVersions []string
+			for _, h := range clusterVersion.Status.History {
+				if _, err := semver.ParseTolerant(h.Version); err != nil {
+					continue
+				}
+				parseableVersions = append(parseableVersions, h.Version)
+				if h.State == configv1.CompletedUpdate {
+					break
+				}
+			}
+			sort.Slice(parseableVersions, func(i, j int) bool {
+				vi, _ := semver.ParseTolerant(parseableVersions[i])
+				vj, _ := semver.ParseTolerant(parseableVersions[j])
+				return vi.LT(vj)
+			})
+			Expect(parseableVersions).NotTo(BeEmpty(), "no parseable node pool install version found in ClusterVersion history for cluster %s", clusterName)
+			nodePoolParams.OpenshiftVersionId = parseableVersions[0]
+
+			err = tc.CreateNodePoolFromParam20260630(
+				ctx,
+				GinkgoLogr,
+				*resourceGroup.Name,
+				managedResourceGroupName,
+				clusterName,
+				nodePoolParams,
+				framework.NodePoolCreationTimeout,
+			)
+			Expect(err).NotTo(HaveOccurred(), "failed to create worker node pool %q for cluster %s", workerNodePoolName, clusterName)
+
 			By("verifying the guest Karpenter CRDs are installed")
 			// Hard precondition, not a workaround target: the standalone
 			// karpenter-operator installs these unconditionally on startup, so
@@ -263,6 +323,13 @@ var _ = Describe("Customer", func() {
 			Expect(err).NotTo(HaveOccurred(), "failed to scale workload %q back to 0 replicas", workloadName)
 			err = framework.DeleteAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName)
 			Expect(err).NotTo(HaveOccurred(), "failed to delete AKSNodeClass/NodePool %q", karpenterResourceName)
+			// 10m: an observed real run drained and deprovisioned in ~1m15s once
+			// cluster-infra pods had a regular worker node pool to live on instead
+			// of the Karpenter node (see the worker node pool step above), so 10m
+			// leaves a comfortable margin without masking a genuine hang.
+			// Consolidation itself is not the bottleneck - Karpenter's default
+			// consolidateAfter is 0s when the NodePool doesn't set spec.disruption
+			// (confirmed against karpenter.sh_nodepools.yaml).
 			err = verifiers.VerifyKarpenterDeprovisioned(karpenterResourceName, 10*time.Minute).Verify(ctx, adminRESTConfig)
 			Expect(err).NotTo(HaveOccurred(), "Karpenter did not deprovision the Node/NodeClaim for NodePool %q; a VM may have leaked", karpenterResourceName)
 
