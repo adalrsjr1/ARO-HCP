@@ -41,7 +41,7 @@ func TestBuildAutoNodePayload_GoldenJSON(t *testing.T) {
 		Name:      "test-domain-prefix",
 	}
 
-	raw, err := buildAutoNodePayload(target, "11111111-2222-3333-4444-555555555555")
+	raw, err := buildAutoNodePayload(target, "11111111-2222-3333-4444-555555555555", ImageOverrides{})
 	require.NoError(t, err)
 
 	const golden = `{` +
@@ -55,6 +55,40 @@ func TestBuildAutoNodePayload_GoldenJSON(t *testing.T) {
 }
 
 func TestBuildAutoNodePayload_RejectsEmptyClientID(t *testing.T) {
-	_, err := buildAutoNodePayload(kubeapplierapi.ResourceReference{}, "")
+	_, err := buildAutoNodePayload(kubeapplierapi.ResourceReference{}, "", ImageOverrides{})
 	assert.Error(t, err)
+}
+
+// TestBuildAutoNodePayload_SetsImageOverrideAnnotations pins that the
+// personal-dev-only image overrides (see the karpenterOperatorImageAnnotation
+// doc comment) only ever appear on the wire when explicitly configured, and
+// never leak an annotations key at all when both overrides are empty (the
+// golden-JSON test above already covers that zero-value case).
+func TestBuildAutoNodePayload_SetsImageOverrideAnnotations(t *testing.T) {
+	target := kubeapplierapi.ResourceReference{
+		Namespace: "ocm-test-env-clu123",
+		Name:      "test-domain-prefix",
+	}
+
+	raw, err := buildAutoNodePayload(target, "11111111-2222-3333-4444-555555555555", ImageOverrides{
+		KarpenterOperatorImage:      "example.azurecr.io/karpenter-operator:demo",
+		KarpenterProviderAzureImage: "example.azurecr.io/karpenter-azure:demo",
+	})
+	require.NoError(t, err)
+
+	const golden = `{` +
+		`"apiVersion":"hypershift.openshift.io/v1beta1",` +
+		`"kind":"HostedCluster",` +
+		`"metadata":{` +
+		`"name":"test-domain-prefix",` +
+		`"namespace":"ocm-test-env-clu123",` +
+		`"annotations":{` +
+		`"hypershift.openshift.io/karpenter-operator-image":"example.azurecr.io/karpenter-operator:demo",` +
+		`"hypershift.openshift.io/karpenter-provider-azure-image":"example.azurecr.io/karpenter-azure:demo"` +
+		`}` +
+		`},` +
+		`"spec":{"autoNode":{"provisionerConfig":{"name":"Karpenter","karpenter":{"platform":"Azure","azure":{"clientID":"11111111-2222-3333-4444-555555555555"}}}}}` +
+		`}`
+
+	assert.JSONEq(t, golden, string(raw))
 }

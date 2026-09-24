@@ -61,8 +61,53 @@ type partialHostedCluster struct {
 }
 
 type partialObjectMeta struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// karpenterOperatorImageAnnotation and karpenterProviderAzureImageAnnotation
+// mirror hyperkarpenterv1.KarpenterOperatorImage /
+// hyperkarpenterv1.KarpenterProviderAzureImage from the personal hypershift
+// fork this environment runs (~/Coding/tmp-karpenter/hypershift, branch
+// enable-standalone-karpenter-operator-azure) - not available to import for
+// the same reason as autoNodeSpec above (unpublished branch, no go.mod pin).
+// These annotations exist ONLY as a stopgap because that fork's
+// karpenter-operator component cannot otherwise resolve its own image or the
+// karpenter-provider-azure operand image (unlike upstream, which resolves the
+// Azure provider image from the release payload - see
+// control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator/deployment.go
+// in that fork). Remove this whole ImageOverrides mechanism once the fork (or
+// its upstream equivalent) can resolve both images without annotations; see
+// karpenter-util/deployment-steps.md step 3 for the manual `oc annotate`
+// procedure this automates.
+const (
+	karpenterOperatorImageAnnotation      = "hypershift.openshift.io/karpenter-operator-image"
+	karpenterProviderAzureImageAnnotation = "hypershift.openshift.io/karpenter-provider-azure-image"
+)
+
+// ImageOverrides carries personal-dev-only image references for the
+// standalone karpenter-operator and its karpenter-provider-azure operand.
+// Both fields are optional; a zero-valued ImageOverrides sets no annotations
+// at all, which is required in every environment except personal dev (see
+// the const block above for why these annotations exist only as a stopgap).
+type ImageOverrides struct {
+	KarpenterOperatorImage      string
+	KarpenterProviderAzureImage string
+}
+
+func (o ImageOverrides) annotations() map[string]string {
+	annotations := map[string]string{}
+	if o.KarpenterOperatorImage != "" {
+		annotations[karpenterOperatorImageAnnotation] = o.KarpenterOperatorImage
+	}
+	if o.KarpenterProviderAzureImage != "" {
+		annotations[karpenterProviderAzureImageAnnotation] = o.KarpenterProviderAzureImage
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
 }
 
 type partialHostedClusterSpec struct {
@@ -118,7 +163,7 @@ type karpenterAzureConfigSpec struct {
 // KarpenterConfig.Platform is Azure (the karpenter-operator hard-errors
 // without it), so callers must gate on a non-empty clientID before calling
 // this — see autoNodeSyncer.SyncOnce.
-func buildAutoNodePayload(target kubeapplierapi.ResourceReference, clientID string) ([]byte, error) {
+func buildAutoNodePayload(target kubeapplierapi.ResourceReference, clientID string, imageOverrides ImageOverrides) ([]byte, error) {
 	if clientID == "" {
 		return nil, utils.TrackError(fmt.Errorf("clientID must not be empty"))
 	}
@@ -128,8 +173,9 @@ func buildAutoNodePayload(target kubeapplierapi.ResourceReference, clientID stri
 			Kind:       "HostedCluster",
 		},
 		Metadata: partialObjectMeta{
-			Name:      target.Name,
-			Namespace: target.Namespace,
+			Name:        target.Name,
+			Namespace:   target.Namespace,
+			Annotations: imageOverrides.annotations(),
 		},
 		Spec: partialHostedClusterSpec{
 			AutoNode: autoNodeSpec{
@@ -161,6 +207,7 @@ func buildAutoNodeApplyDesire(
 	managementClusterResourceID *azcorearm.ResourceID,
 	target kubeapplierapi.ResourceReference,
 	clientID string,
+	imageOverrides ImageOverrides,
 ) (*kubeapplierapi.ApplyDesire, error) {
 	resourceIDStr := kubeapplierapi.ToClusterScopedApplyDesireResourceIDString(
 		subscriptionID, resourceGroupName, clusterName, autoNodeApplyDesireName,
@@ -170,7 +217,7 @@ func buildAutoNodeApplyDesire(
 		return nil, utils.TrackError(fmt.Errorf("failed to parse ApplyDesire resource ID: %w", err))
 	}
 
-	raw, err := buildAutoNodePayload(target, clientID)
+	raw, err := buildAutoNodePayload(target, clientID, imageOverrides)
 	if err != nil {
 		return nil, err
 	}

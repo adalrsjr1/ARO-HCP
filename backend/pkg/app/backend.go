@@ -130,6 +130,10 @@ type BackendOptions struct {
 	CheckAccessV2ClientBuilder                          azureclient.CheckAccessV2ClientBuilder
 	ClusterScopedIdentitiesConfig                       *internalazure.ClusterScopedIdentitiesConfig
 	CloudEnvironment                                    *azureconfig.AzureCloudEnvironment
+	// AutoNodeImageOverrides is a personal-dev-only stopgap: see the doc
+	// comment on clusterautonode.ImageOverrides for why it exists and when to
+	// remove it. Empty in every environment except personal dev.
+	AutoNodeImageOverrides clusterautonode.ImageOverrides
 }
 
 const backendShutdownTimeout = 31 * time.Second
@@ -735,6 +739,7 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 		backendInformers,
 		unionKubeApplierInformers,
 		b.options.MaestroSourceEnvironmentIdentifier,
+		b.options.AutoNodeImageOverrides,
 	)
 
 	autoNodeStatusController := clusterautonode.NewAutoNodeStatusController(

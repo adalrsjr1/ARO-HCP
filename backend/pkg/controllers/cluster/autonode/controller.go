@@ -69,6 +69,7 @@ type autoNodeSyncer struct {
 	applyDesireLister                   kubeapplierlisters.ApplyDesireLister
 	kubeApplierDBClients                kubeappliercosmosstorage.KubeApplierDBClients
 	hostedClusterNamespaceEnvIdentifier string
+	imageOverrides                      ImageOverrides
 }
 
 var _ controllerutils.ClusterSyncer = (*autoNodeSyncer)(nil)
@@ -84,6 +85,7 @@ func NewAutoNodeEnablerController(
 	informers coreinformers.BackendInformers,
 	kubeApplierInformers *unionkubeapplierinformers.UnionKubeApplierInformers,
 	hostedClusterNamespaceEnvIdentifier string,
+	imageOverrides ImageOverrides,
 ) controllerutils.Controller {
 	_, clusterLister := informers.Clusters()
 	_, serviceProviderClusterLister := informers.ServiceProviderClusters()
@@ -97,6 +99,7 @@ func NewAutoNodeEnablerController(
 		applyDesireLister:                   applyDesireLister,
 		kubeApplierDBClients:                kubeApplierDBClients,
 		hostedClusterNamespaceEnvIdentifier: hostedClusterNamespaceEnvIdentifier,
+		imageOverrides:                      imageOverrides,
 	}
 
 	controller := controllerutils.NewClusterWatchingController(
@@ -241,7 +244,7 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 	//       ClientID is set - so no additional guard for those fields is
 	//       needed here.
 	target := controllerutils.HostedClusterTarget(s.hostedClusterNamespaceEnvIdentifier, csClusterID, csClusterDomainPrefix)
-	desire, err := buildAutoNodeApplyDesire(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, mcResourceID, target, clientID)
+	desire, err := buildAutoNodeApplyDesire(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName, mcResourceID, target, clientID, s.imageOverrides)
 	if err != nil {
 		return err
 	}
