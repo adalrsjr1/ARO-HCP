@@ -17,16 +17,18 @@
 // spec.autoNode onto the cluster's existing HostedCluster object, triggering
 // the hypershift-operator to deploy the karpenter-operator.
 //
-// The primary trigger is Cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode,
+// The trigger is Cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode,
 // the sticky/immutable-post-create AFEC-gated feature flag. A cluster's
 // AutoNode enablement DECISION is create-time and immutable: it is set once
 // (via admission) and never changes for the life of the cluster, which is
 // why there is no coded disable path here - there is nothing to disable.
-// ServiceProviderClusterSpec.DesiredAutoNodeEnabled/DesiredAutoNodeKarpenterAzureClientID
-// (set via the admin API) remain a temporary parallel trigger and a
-// break-glass client-ID fallback respectively, retained only until the
-// automatic path has a real observation window (see the retirement runbook
-// referenced from the originating design discussion).
+//
+// This controller previously also accepted a validation-only admin-API
+// trigger/client-ID fallback (ServiceProviderClusterSpec.DesiredAutoNodeEnabled/
+// DesiredAutoNodeKarpenterAzureClientID) from the original AutoNode POC,
+// retired once the AFEC-gated path plus the cluster's own resolved "autonode"
+// data-plane identity were proven sufficient end-to-end (see
+// test/e2e/cluster_autonode.go).
 //
 // The DELIVERY MECHANISM this decision drives is, mechanically, an ordinary
 // day-2 controller: it waits for the HostedCluster to actually exist (via the
@@ -153,29 +155,18 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 		return utils.TrackError(fmt.Errorf("failed to get cached ServiceProviderCluster: %w", err))
 	}
 
-	// Primary trigger: the sticky, AFEC-gated, create-time-immutable
-	// experimental feature. The admin-set DesiredAutoNodeEnabled field is a
-	// temporary parallel trigger, retained only until the automatic path has
-	// a real observation window (see the retirement runbook referenced in
-	// the package doc).
-	autoNodeRequested := existingCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode == coreapi.AutoNode ||
-		(serviceProviderCluster.Spec.DesiredAutoNodeEnabled != nil && *serviceProviderCluster.Spec.DesiredAutoNodeEnabled)
+	// Trigger: the sticky, AFEC-gated, create-time-immutable experimental
+	// feature.
+	autoNodeRequested := existingCluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode == coreapi.AutoNode
 	if !autoNodeRequested {
 		return nil
 	}
 
-	// Prefer the ClientID resolved from the cluster's own "autonode" data-plane
-	// identity: it's the authoritative source once resolved, and unlike the
-	// admin-set field it can never go stale relative to the identity actually
-	// federated for the cluster. The admin-set field is a break-glass fallback
-	// for use only while the resolved value isn't available yet - it must
-	// never permanently shadow the resolved value once that appears.
-	var clientID string
-	if resolved, ok := autoNodeKarpenterClientID(existingCluster, serviceProviderCluster); ok {
-		clientID = resolved
-	} else if fallback := serviceProviderCluster.Spec.DesiredAutoNodeKarpenterAzureClientID; fallback != nil && *fallback != "" {
-		clientID = *fallback
-	} else {
+	// ClientID is resolved from the cluster's own "autonode" data-plane
+	// identity: it's the authoritative source, and can never go stale
+	// relative to the identity actually federated for the cluster.
+	clientID, ok := autoNodeKarpenterClientID(existingCluster, serviceProviderCluster)
+	if !ok {
 		// AutoNode is requested but the Azure managed-identity client ID
 		// hasn't been resolved yet. hypershift's KarpenterAzureConfig.ClientID
 		// is a required field once platform=Azure, so applying without it

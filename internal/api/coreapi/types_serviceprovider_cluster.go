@@ -115,27 +115,6 @@ type ServiceProviderClusterSpec struct {
 	// Default is Enabled. Set to Disabled via Admin API to pause scheduled backups.
 	BackupScheduleState BackupScheduleState `json:"backupScheduleState,omitempty"`
 
-	// DesiredAutoNodeEnabled is a validation-only intent field for the
-	// AutoNode/Karpenter proof-of-concept: when set to true via the Admin
-	// API, the AutoNodeEnabler backend controller writes a partial
-	// HostedCluster ApplyDesire (spec.autoNode) via kube-applier so the
-	// hypershift-operator rolls out the karpenter-operator. This field is
-	// intentionally not exposed on any versioned ARM API and has no
-	// disable/false semantics yet; nil means no request has been made.
-	DesiredAutoNodeEnabled *bool `json:"desiredAutoNodeEnabled,omitempty"`
-
-	// DesiredAutoNodeKarpenterAzureClientID is a validation-only companion to
-	// DesiredAutoNodeEnabled: the client ID of an out-of-band, manually
-	// provisioned managed identity (with a federated credential trusting this
-	// cluster's OIDC issuer for the karpenter service account) that the
-	// AutoNodeEnabler backend controller places at
-	// spec.autoNode.provisionerConfig.karpenter.azure.clientID. This POC does
-	// not provision or validate the identity itself — nil/empty means no
-	// client ID has been supplied yet, in which case the ApplyDesire is still
-	// written but the hypershift-operator's karpenter-operator component will
-	// fail to reconcile until this is set (Azure AutoNode requires it).
-	DesiredAutoNodeKarpenterAzureClientID *string `json:"desiredAutoNodeKarpenterAzureClientID,omitempty"`
-
 	// ManagementClusterResourceID is the resource ID of the management cluster the
 	// scheduler has selected for this HCP. This is the scheduler's intent (desired
 	// placement): nil means placement has not been resolved yet. Downstream
