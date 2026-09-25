@@ -411,11 +411,15 @@ defaults:
   # Hypershift
   hypershift:
     image:
-      registry: quay.io
-      repository: redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator
-      digest: sha256:60eff695e3facbaffd0096f6cd69b97745eb64230f27350abf2cb23bf516081a # e2c566a4d792fd81fd85265e8ab858a5fc3e4044 (2026-09-25 01:52)
+      # registry: quay.io
+      # repository: redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator
+      # digest: sha256:60eff695e3facbaffd0096f6cd69b97745eb64230f27350abf2cb23bf516081a # e2c566a4d792fd81fd85265e8ab858a5fc3e4044 (2026-09-25 01:52)
+      registry: arohcpsvcdev.azurecr.io
+      repository: asampaio-hypershift:karpenter
+      digest: sha256:ed24a26a8ee10446a7a39b5bc36845b4e6214588b25f6196d72299bb1844ec31
     namespace: hypershift
-    additionalInstallArg: '--enable-cpo-overrides --disable-capi-migration'
+    # cd tooling/helmtest && UPDATE_NODE_ROLLOUT_FIXTURE=true go test -run TestNodeRolloutConfig -count=1 ./...
+    additionalInstallArg: '--enable-cpo-overrides --disable-capi-migration --tech-preview-no-upgrade=true --enable-standalone-karpenter-operator=true'
     # By default we set it to empty as this tag is only required for msft environments. We override
     # this value in sdp pipelines for msft environments.
     sharedIngressIPTag: ''

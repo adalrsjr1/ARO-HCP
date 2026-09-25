@@ -482,11 +482,12 @@ hcpRecovery:
     replicas: 2
     serviceAccountName: hcp-recovery
 hypershift:
-  additionalInstallArg: --enable-cpo-overrides --disable-capi-migration
+  additionalInstallArg: --enable-cpo-overrides --disable-capi-migration --tech-preview-no-upgrade=true
+    --enable-standalone-karpenter-operator=true
   image:
-    digest: sha256:60eff695e3facbaffd0096f6cd69b97745eb64230f27350abf2cb23bf516081a
-    registry: quay.io
-    repository: redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator
+    digest: sha256:03d052efb15f946fd897ad2dec91a3936ba26e197ee90be58605830e9aae331d
+    registry: arohcpsvcdev.azurecr.io
+    repository: asampaio-hypershift:karpenter
   limitClusterSizes: true
   metricsSet:
     performanceMetrics: true
