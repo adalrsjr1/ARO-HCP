@@ -219,10 +219,27 @@ func toSPExperimentalFeatures(oldObj *coreapi.ClusterServiceProviderProperties) 
 // Without AFEC registration ExperimentalFeatures is zeroed and tags are
 // ignored; with AFEC registered, unrecognized experimental tags and invalid
 // values are rejected.
-func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *ClusterAdmissionContext, _ operation.Operation, _ *field.Path, newObj, _ *coreapi.ExperimentalFeatures) field.ErrorList {
+//
+// AutoNode is the one field here that is sticky across UPDATE rather than
+// recomputed from tags every time: it is unconditionally inherited from
+// oldObj (even when the AFEC check above would otherwise zero everything, and
+// even if the tag is absent or was edited), and a tag-driven attempt to
+// change it on UPDATE is rejected. This is deliberate: internal/ocm's
+// BuildCSCluster only ever sends AutoNode to Cluster Service on CREATE (see
+// its comment), so allowing the RP's view of AutoNode to drift on UPDATE —
+// whether from an explicit tag rewrite or from the AFEC being deregistered —
+// would silently diverge from what Cluster Service has, with no update path
+// to reconcile it. Enabling/disabling AutoNode post-create is a deliberate
+// future feature gated on that CS-side reconciliation existing.
+func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *ClusterAdmissionContext, op operation.Operation, _ *field.Path, newObj, oldObj *coreapi.ExperimentalFeatures) field.ErrorList {
+	var inheritedAutoNode coreapi.AutoNodeMode
+	if op.Type == operation.Update && oldObj != nil {
+		inheritedAutoNode = oldObj.AutoNode
+	}
+
 	subscription := admissionContext.Subscription
 	if subscription == nil || !subscription.HasRegisteredFeature(metadataapi.FeatureExperimentalReleaseFeatures) {
-		*newObj = coreapi.ExperimentalFeatures{}
+		*newObj = coreapi.ExperimentalFeatures{AutoNode: inheritedAutoNode}
 		return nil
 	}
 
@@ -236,7 +253,7 @@ func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *Clus
 	var errs field.ErrorList
 
 	// Reject unrecognized experimental tags.
-	knownTags := sets.New(metadataapi.TagClusterSingleReplica, metadataapi.TagClusterSizeOverride, metadataapi.TagClusterCPOImageOverride, metadataapi.TagClusterControlPlaneExactVersion, metadataapi.TagClusterMaxCreationDuration, metadataapi.TagClusterMaxDeletionDuration, metadataapi.TagClusterDisableSwift)
+	knownTags := sets.New(metadataapi.TagClusterSingleReplica, metadataapi.TagClusterSizeOverride, metadataapi.TagClusterCPOImageOverride, metadataapi.TagClusterControlPlaneExactVersion, metadataapi.TagClusterMaxCreationDuration, metadataapi.TagClusterMaxDeletionDuration, metadataapi.TagClusterDisableSwift, metadataapi.TagClusterAutoNode)
 	for k := range tags {
 		if strings.HasPrefix(strings.ToLower(k), metadataapi.ExperimentalClusterTagPrefix) && !knownTags.Has(strings.ToLower(k)) {
 			errs = append(errs, field.Invalid(tagsPath.Key(k), k, "unrecognized experimental tag"))
@@ -270,6 +287,30 @@ func mutateClusterExperimentalFeatures(_ context.Context, admissionContext *Clus
 			tagsPath.Key(metadataapi.TagClusterSizeOverride), sizeOverrideValue,
 			fmt.Sprintf("must be %q or empty", coreapi.MinimalControlPlanePodSizing),
 		))
+	}
+
+	autoNodeValue := lookupTag(tags, metadataapi.TagClusterAutoNode)
+	switch coreapi.AutoNodeMode(autoNodeValue) {
+	case coreapi.AutoNode:
+		experimentalFeatures.AutoNode = coreapi.AutoNode
+	case coreapi.DefaultAutoNodeMode:
+		// absent or empty
+	default:
+		errs = append(errs, field.Invalid(
+			tagsPath.Key(metadataapi.TagClusterAutoNode), autoNodeValue,
+			fmt.Sprintf("must be %q or empty", coreapi.AutoNode),
+		))
+	}
+	if op.Type == operation.Update {
+		if experimentalFeatures.AutoNode != inheritedAutoNode {
+			errs = append(errs, field.Invalid(
+				tagsPath.Key(metadataapi.TagClusterAutoNode), autoNodeValue,
+				"AutoNode cannot be changed after cluster creation",
+			))
+		}
+		// Sticky regardless of the tag (see the function doc comment). A no-op
+		// given the check above already passed (or the whole request fails).
+		experimentalFeatures.AutoNode = inheritedAutoNode
 	}
 
 	cpoImageValue := lookupTag(tags, metadataapi.TagClusterCPOImageOverride)
