@@ -38,6 +38,7 @@ import (
 	azureclient "github.com/Azure/ARO-HCP/backend/pkg/azure/client"
 	azureconfig "github.com/Azure/ARO-HCP/backend/pkg/azure/config"
 	"github.com/Azure/ARO-HCP/backend/pkg/controllers/billing"
+	clusterautonode "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/autonode"
 	clusterazureresources "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/azureresources"
 	clusterbackups "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/backups"
 	clustercreation "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/creation"
@@ -130,6 +131,10 @@ type BackendOptions struct {
 	CheckAccessV2ClientBuilder                          azureclient.CheckAccessV2ClientBuilder
 	ClusterScopedIdentitiesConfig                       *internalazure.ClusterScopedIdentitiesConfig
 	CloudEnvironment                                    *azureconfig.AzureCloudEnvironment
+	// AutoNodeImageOverrides is a personal-dev-only stopgap: see the doc
+	// comment on clusterautonode.ImageOverrides for why it exists and when to
+	// remove it. Empty in every environment except personal dev.
+	AutoNodeImageOverrides clusterautonode.ImageOverrides
 }
 
 const backendShutdownTimeout = 31 * time.Second
@@ -731,6 +736,23 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 		b.options.BackupConfig,
 	)
 
+	autoNodeEnablerController := clusterautonode.NewAutoNodeEnablerController(
+		b.options.ResourcesDBClient,
+		b.options.KubeApplierDBClients,
+		backendInformers,
+		unionKubeApplierInformers,
+		b.options.MaestroSourceEnvironmentIdentifier,
+		b.options.AutoNodeImageOverrides,
+	)
+
+	autoNodeStatusController := clusterautonode.NewAutoNodeStatusController(
+		b.options.ResourcesDBClient,
+		serviceProviderClusterLister,
+		backendInformers,
+		unionKubeApplierInformers,
+		unionReadDesireLister,
+	)
+
 	keyRotationBackupController := clusterbackups.NewKeyRotationBackupController(
 		b.options.ResourcesDBClient,
 		b.options.KubeApplierDBClients,
@@ -1241,11 +1263,13 @@ func (b *Backend) runBackendControllersUnderLeaderElection(ctx context.Context, 
 				go cosmosMigrationController.Run(ctx, 5)
 				go virtualMachineResourceSKUsCachedReaderController.Run(ctx, 20)
 				go backupScheduleController.Run(ctx, 20)
+				go autoNodeEnablerController.Run(ctx, 20)
 				go fetchMSIIdentitiesInfoController.Run(ctx, 20)
 				go fetchDataPlaneOperatorsManagedIdentitiesInfoController.Run(ctx, 20)
 				go identityRoleAssignmentsController.Run(ctx, 20)
 				go keyRotationBackupController.Run(ctx, 20)
 				go clusterResourcesController.Run(ctx, 20)
+				go autoNodeStatusController.Run(ctx, 20)
 			},
 			OnStoppedLeading: func() {
 				// This needs to be defined even though it does nothing.
