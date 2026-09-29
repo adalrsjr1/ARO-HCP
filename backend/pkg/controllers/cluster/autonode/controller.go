@@ -20,8 +20,8 @@
 // The trigger is Cluster.ServiceProviderProperties.ExperimentalFeatures.AutoNode,
 // the sticky/immutable-post-create AFEC-gated feature flag. A cluster's
 // AutoNode enablement DECISION is create-time and immutable: it is set once
-// (via admission) and never changes for the life of the cluster, which is
-// why there is no coded disable path here - there is nothing to disable.
+// (via admission) and never changes for the life of the cluster, so there is
+// no user-facing disable path.
 //
 // The DELIVERY MECHANISM this decision drives is, mechanically, an ordinary
 // day-2 controller: it waits for the HostedCluster to actually exist (via the
@@ -30,6 +30,14 @@
 // post-create HostedCluster field. Do not confuse "the decision is
 // create-time-immutable" with "the write only ever happens once"; only the
 // former is true.
+//
+// Decision-immutability does NOT mean there is nothing to tear down: the
+// ApplyDesire this controller writes must be purged when the cluster is
+// deleted, because the cluster-deletion precondition
+// deletePreconditionAllApplyDesiresGone blocks forever on any remaining
+// ApplyDesire, and the generic cluster-child cleanup controller deliberately
+// skips desires tagged with an owning controller name (this one) - see
+// syncDeletion below.
 package autonode
 
 import (
@@ -132,13 +140,6 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 	if err != nil {
 		return utils.TrackError(fmt.Errorf("failed to get cached Cluster: %w", err))
 	}
-	// No coded disable/teardown path: once a cluster starts deleting, stop
-	// touching it. Any existing ApplyDesire is swept by normal cluster-child
-	// cleanup like the rest of the cluster-scoped kube-applier documents (to
-	// be verified per the manual retirement runbook, not assumed here).
-	if existingCluster.ServiceProviderProperties.DeletionTimestamp != nil {
-		return nil
-	}
 
 	serviceProviderCluster, err := s.serviceProviderClusterLister.Get(ctx, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
 	if cosmosstorageutils.IsNotFoundError(err) {
@@ -146,6 +147,21 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 	}
 	if err != nil {
 		return utils.TrackError(fmt.Errorf("failed to get cached ServiceProviderCluster: %w", err))
+	}
+
+	// Handle deletion before the gates below. The cluster deletion controller
+	// checks deletePreconditionAllApplyDesiresGone only after ClusterServiceID is
+	// nil, while normal reconciliation returns early in that state. Moving this
+	// below that gate would prevent syncDeletion from running and deadlock
+	// deletion. The other gates can also become false after a desire is created,
+	// so they must not block cleanup either.
+	if needsDeletionWork(*existingCluster, *serviceProviderCluster) {
+		return s.syncDeletion(ctx, key, serviceProviderCluster)
+	}
+	if existingCluster.ServiceProviderProperties.DeletionTimestamp != nil {
+		// Deleting, but no management cluster was ever assigned, so nothing
+		// could have been delivered. Nothing to tear down.
+		return nil
 	}
 
 	// Trigger: the sticky, AFEC-gated, create-time-immutable experimental
@@ -237,6 +253,42 @@ func (s *autoNodeSyncer) SyncOnce(ctx context.Context, key controllerutils.HCPCl
 		return err
 	}
 
+	return nil
+}
+
+// needsDeletionWork reports whether the cluster is deleting and a management
+// cluster was assigned to it, meaning an AutoNode ApplyDesire may have been
+// delivered and needs tearing down. Mirrors backups' needsDeletionWork.
+func needsDeletionWork(existingCluster coreapi.Cluster, serviceProviderCluster coreapi.ServiceProviderCluster) bool {
+	if existingCluster.ServiceProviderProperties.DeletionTimestamp == nil {
+		return false
+	}
+	return serviceProviderCluster.Status.ManagementClusterResourceID != nil
+}
+
+// syncDeletion tears down the AutoNode ApplyDesire for a deleting cluster.
+//
+// Purge the Cosmos document instead of marking the desire for deletion.
+// Marking it would make kube-applier delete the target HostedCluster, although
+// this desire owns only its spec.autoNode field. Cluster Service owns the
+// HostedCluster lifecycle and handles its deletion. Purging is safe because
+// this desire does not own a Kubernetes object; see PurgeApplyDesire's contract.
+func (s *autoNodeSyncer) syncDeletion(ctx context.Context, key controllerutils.HCPClusterKey, serviceProviderCluster *coreapi.ServiceProviderCluster) error {
+	kubeApplierClient := s.kubeApplierDBClients.For(ctx, serviceProviderCluster.Status.ManagementClusterResourceID)
+	if kubeApplierClient == nil {
+		// Registry doesn't have an entry yet for this MC. Skip and rely on
+		// retrigger, same as the creation path above.
+		return nil
+	}
+	applyDesireCRUD, err := kubeApplierClient.ApplyDesiresForCluster(key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
+	if err != nil {
+		return utils.TrackError(fmt.Errorf("get ApplyDesire CRUD: %w", err))
+	}
+
+	if err := kubeapplierhelpers.PurgeApplyDesire(ctx, autoNodeApplyDesireName, applyDesireCRUD); err != nil {
+		return err
+	}
+	utils.LoggerFromContext(ctx).Info("removed AutoNode ApplyDesire document for deleting cluster", "desire", autoNodeApplyDesireName)
 	return nil
 }
 
