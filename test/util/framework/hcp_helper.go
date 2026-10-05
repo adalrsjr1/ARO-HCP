@@ -53,6 +53,7 @@ import (
 	hcpsdk20260630preview "github.com/Azure/ARO-HCP/test/sdk/v20260630preview/resourcemanager/redhatopenshifthcp/armredhatopenshifthcp"
 	hcpsdk20260901preview "github.com/Azure/ARO-HCP/test/sdk/v20260901preview/resourcemanager/redhatopenshifthcp/armredhatopenshifthcp"
 	hcpsdk20261001preview "github.com/Azure/ARO-HCP/test/sdk/v20261001preview/resourcemanager/redhatopenshifthcp/armredhatopenshifthcp"
+	hcpsdk20270330preview "github.com/Azure/ARO-HCP/test/sdk/v20270330preview/resourcemanager/redhatopenshifthcp/armredhatopenshifthcp"
 )
 
 // checkOperationResult ensures the result model returned by a runtime.Poller
@@ -81,6 +82,9 @@ func checkOperationResult(expectModel, resultModel any) error {
 		cmpopts.IgnoreFields(hcpsdk20261001preview.HcpOpenShiftCluster{}, "SystemData"),
 		cmpopts.IgnoreFields(hcpsdk20261001preview.NodePool{}, "SystemData"),
 		cmpopts.IgnoreFields(hcpsdk20261001preview.ExternalAuth{}, "SystemData"),
+		cmpopts.IgnoreFields(hcpsdk20270330preview.HcpOpenShiftCluster{}, "SystemData"),
+		cmpopts.IgnoreFields(hcpsdk20270330preview.NodePool{}, "SystemData"),
+		cmpopts.IgnoreFields(hcpsdk20270330preview.ExternalAuth{}, "SystemData"),
 	)
 
 	if len(diff) > 0 {
