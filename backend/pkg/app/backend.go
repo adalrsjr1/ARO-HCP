@@ -37,6 +37,7 @@ import (
 	"github.com/Azure/ARO-HCP/backend/pkg/azure/cachedreader"
 	azureclient "github.com/Azure/ARO-HCP/backend/pkg/azure/client"
 	azureconfig "github.com/Azure/ARO-HCP/backend/pkg/azure/config"
+	clusterautonode "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/autonode"
 	clusterbackups "github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/backups"
 	internalazure "github.com/Azure/ARO-HCP/internal/azure"
 	sharedleaderelection "github.com/Azure/ARO-HCP/internal/leaderelection"
@@ -78,6 +79,10 @@ type BackendOptions struct {
 	CheckAccessV2ClientBuilder                          azureclient.CheckAccessV2ClientBuilder
 	ClusterScopedIdentitiesConfig                       *internalazure.ClusterScopedIdentitiesConfig
 	CloudEnvironment                                    *azureconfig.AzureCloudEnvironment
+	// AutoNodeImageOverrides is a personal-dev-only stopgap: see the doc
+	// comment on clusterautonode.ImageOverrides for why it exists and when to
+	// remove it. Empty in every environment except personal dev.
+	AutoNodeImageOverrides clusterautonode.ImageOverrides
 }
 
 const backendShutdownTimeout = 31 * time.Second
