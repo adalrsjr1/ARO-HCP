@@ -41,15 +41,16 @@ import (
 	"github.com/Azure/ARO-HCP/test/util/verifiers"
 )
 
-// autoNodeTestOpenshiftVersion and autoNodeTestMarketplaceImage must be kept
-// in lockstep: the marketplace image is an RHCOS build tied to a specific
-// OpenShift minor version, and there is no API-level way to derive one from
-// the other. If autoNodeTestOpenshiftVersion changes, this image reference
-// must be re-verified (e.g. `az vm image list --all --publisher
-// azureopenshift --offer aro4 --sku aro_422-v2 -o table`) and updated too.
-const autoNodeTestOpenshiftVersion = "4.22"
+// autoNodeWebAppTestOpenshiftVersion and autoNodeWebAppTestMarketplaceImage
+// must be kept in lockstep: the marketplace image is an RHCOS build tied to a
+// specific OpenShift minor version, and there is no API-level way to derive
+// one from the other. If autoNodeWebAppTestOpenshiftVersion changes, this
+// image reference must be re-verified (e.g. `az vm image list --all
+// --publisher azureopenshift --offer aro4 --sku aro_422-v2 -o table`) and
+// updated too.
+const autoNodeWebAppTestOpenshiftVersion = "4.22"
 
-var autoNodeTestMarketplaceImage = framework.KarpenterMarketplaceImage{
+var autoNodeWebAppTestMarketplaceImage = framework.KarpenterMarketplaceImage{
 	Publisher: "azureopenshift",
 	Offer:     "aro4",
 	SKU:       "aro_422-v2",
@@ -72,11 +73,11 @@ var autoNodeTestMarketplaceImage = framework.KarpenterMarketplaceImage{
 // framework.RunKarpenterNodeCSRApprover's doc comment) - a passing run here is
 // not evidence that gap is closed.
 var _ = Describe("Customer", func() {
-	It("should be able to create a cluster with autonode enabled on OCP version >= 4.22",
+	It("should be able to create a cluster with autonode enabled on OCP version >= 4.22 and run a web app on the Karpenter-provisioned node",
 		labels.RequireNothing, labels.Medium, labels.Slow, labels.Positive, labels.AroRpApiCompatible, labels.CreateCluster,
 		labels.MIContainers(0),
 		func(ctx context.Context) {
-			const clusterName = "autonode-enable-422"
+			const clusterName = "autonode-enable-webapp"
 
 			tc := framework.NewTestContext()
 
@@ -86,13 +87,13 @@ var _ = Describe("Customer", func() {
 			}
 
 			By("creating a resource group")
-			resourceGroup, err := tc.NewResourceGroup(ctx, "autonode-enable", tc.Location())
+			resourceGroup, err := tc.NewResourceGroup(ctx, "autonode-enable-webapp", tc.Location())
 			Expect(err).NotTo(HaveOccurred(), "failed to create resource group for AutoNode enablement test")
 
 			By("creating cluster parameters with version 4.22 and the typed AutoNode field set to Enabled")
 			clusterParams := framework.NewDefaultClusterParams20270330()
 			clusterParams.ClusterName = clusterName
-			clusterParams.OpenshiftVersionId = autoNodeTestOpenshiftVersion
+			clusterParams.OpenshiftVersionId = autoNodeWebAppTestOpenshiftVersion
 			// NOTE: The E2E subscription must have the ExperimentalReleaseFeatures AFEC
 			// registered for this to be honored (see NewDefaultClusterParams20270330,
 			// whose default tags rely on the same AFEC). Without it, admission silently
@@ -181,7 +182,7 @@ var _ = Describe("Customer", func() {
 			err = verifiers.VerifyHCPCluster(ctx, adminRESTConfig)
 			Expect(err).NotTo(HaveOccurred(), "failed to verify HCP cluster %s is healthy", clusterName)
 
-			createNodePool := false
+			createNodePool := true
 			if createNodePool {
 
 				By("creating a regular worker node pool so cluster-infra pods have somewhere to run besides the Karpenter node")
@@ -253,7 +254,7 @@ var _ = Describe("Customer", func() {
 			karpenterInstanceTypes := []string{"Standard_D4s_v3", "Standard_D4s_v5"}
 
 			By("applying an AKSNodeClass and NodePool for Karpenter")
-			err = framework.ApplyAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName, autoNodeTestMarketplaceImage, karpenterInstanceTypes)
+			err = framework.ApplyAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName, autoNodeWebAppTestMarketplaceImage, karpenterInstanceTypes)
 			Expect(err).NotTo(HaveOccurred(), "failed to apply AKSNodeClass and NodePool %q", karpenterResourceName)
 			DeferCleanup(func(ctx context.Context) {
 				_ = framework.DeleteAKSNodeClassAndNodePool(ctx, adminRESTConfig, karpenterResourceName)
@@ -313,17 +314,9 @@ var _ = Describe("Customer", func() {
 			Expect(csrApproverErr).NotTo(HaveOccurred(), "background Karpenter node CSR approver failed")
 			Expect(err).NotTo(HaveOccurred(), "Karpenter never provisioned a Ready, schedulable, fully-linked node for NodePool %q", karpenterResourceName)
 
-			// By("verifying the workload's pod reaches Running on the Karpenter-provisioned node")
 			By("verifying a simple web app can run on the Karpenter-provisioned node")
-			Eventually(func(g Gomega) {
-				// err = verifiers.VerifySimpleWebApp(nodeSelector).Verify(ctx, adminRESTConfig)
-				// Expect(err).NotTo(HaveOccurred(), "failed to verify simple web app runs on cluster %q", clusterName)
-
-				pods, err := kubeClient.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + workloadName})
-				g.Expect(err).NotTo(HaveOccurred(), "failed to list pods for workload %q", workloadName)
-				g.Expect(pods.Items).To(HaveLen(1), "expected exactly one pod for workload %q", workloadName)
-				g.Expect(pods.Items[0].Status.Phase).To(Equal(corev1.PodRunning), "expected workload pod to reach Running once Karpenter provisioned a node")
-			}, 5*time.Minute, 10*time.Second).Should(Succeed(), "workload pod never reached Running phase on the Karpenter-provisioned node")
+			err = verifiers.VerifySimpleWebApp(nodeSelector).Verify(ctx, adminRESTConfig)
+			Expect(err).NotTo(HaveOccurred(), "failed to verify simple web app runs on cluster %q", clusterName)
 
 			By("scaling the workload back down and deleting the NodePool/AKSNodeClass, verifying Karpenter actually deprovisions the node")
 			err = framework.ScaleDeployment(ctx, adminRESTConfig, workloadNamespace, workloadName, 0)
@@ -343,5 +336,17 @@ var _ = Describe("Customer", func() {
 			By("deleting the workload namespace")
 			err = framework.DeleteNamespace(ctx, adminRESTConfig, workloadNamespace)
 			Expect(err).NotTo(HaveOccurred(), "failed to delete workload namespace %q", workloadNamespace)
+
+			// failing to delete nodes/nodeclaim blocked by PDB
+			// 			Events:
+			//   Type    Reason             Age                  From       Message
+			//   ----    ------             ----                 ----       -------
+			//   Normal  Launched           10m                  karpenter  Status condition transitioned, Type: Launched, Status: Unknown -> True, Reason: Launched
+			//   Normal  DisruptionBlocked  6m57s (x3 over 10m)  karpenter  Nodeclaim does not have an associated node
+			//   Normal  Registered         6m34s                karpenter  Status condition transitioned, Type: Registered, Status: Unknown -> True, Reason: Registered
+			//   Normal  Initialized        5m37s                karpenter  Status condition transitioned, Type: Initialized, Status: Unknown -> True, Reason: Initialized
+			//   Normal  Ready              5m37s                karpenter  Status condition transitioned, Type: Ready, Status: Unknown -> True, Reason: Ready
+			//   Normal  DisruptionBlocked  4m57s                karpenter  Pdb prevents pod evictions (PodDisruptionBudget=[openshift-ingress/router-default])
+			//   Normal  DisruptionBlocked  57s (x2 over 2m57s)  karpenter  Node is deleting or marked for deletion
 		})
 })
